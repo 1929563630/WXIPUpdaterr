@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>企业微信可信IP自动更新器</title>
+    <link rel="stylesheet" href="/static/lib/element-plus.min.css">
+    <script src="/static/lib/vue.global.prod.min.js"></script>
+    <script src="/static/lib/element-plus.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #f5f7fa;
+            --card: #ffffff;
+            --border: #e4e7ed;
+            --text: #1d2129;
+            --text2: #4e5969;
+            --text3: #86909c;
+            --primary: #3370ff;
+            --primary-light: #e8f0fe;
+            --success: #00b42a;
+            --success-light: #e8ffea;
+            --warn: #ff7d00;
+            --warn-light: #fff7e8;
+            --danger: #f53f3f;
+            --danger-light: #ffece8;
+            --radius: 14px;
+            --shadow: 0 2px 12px rgba(0,0,0,0.06);
+            --shadow-hover: 0 6px 24px rgba(0,0,0,0.1);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px 20px 40px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: auto auto auto 1fr;
+            gap: 20px;
+        }
+        .login-area  { grid-column: 1 / -1; grid-row: 1; }
+        .apps-area   { grid-column: 1; grid-row: 2 / 4; }
+        .ip-area     { grid-column: 2; grid-row: 2 / 4; }
+        .log-area    { grid-column: 1 / -1; grid-row: 4; }
+        @media (max-width: 860px) {
+            .container {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto;
+                padding: 16px 12px 32px;
+            }
+            .login-area, .ip-area, .apps-area, .log-area {
+                grid-column: 1; grid-row: auto;
+            }
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            transition: box-shadow 0.3s ease, transform 0.2s ease;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .card:hover {
+            box-shadow: var(--shadow-hover);
+            transform: translateY(-2px);
+        }
+        .card-body {
+            padding: 20px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .card-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        .card-header h3 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card-header h3 .icon {
+            width: 28px; height: 28px;
+            border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 15px;
+        }
+
+        /* 状态指示 */
+        .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0;
+        }
+        .status-dot.green { background: var(--success); box-shadow: 0 0 8px rgba(0,180,42,0.4); }
+        .status-dot.red { background: var(--danger); box-shadow: 0 0 8px rgba(245,63,63,0.4); }
+        .status-dot.yellow { background: var(--warn); box-shadow: 0 0 8px rgba(255,125,0,0.4); }
+
+        /* 登录区 */
+        .login-area { grid-column: 1 / -1; }
+        .login-area .card-body { padding: 24px 20px; }
+        .login-content { display: flex; gap: 24px; align-items: flex-start; }
+        @media (max-width: 640px) {
+            .login-content { flex-direction: column; align-items: center; }
+        }
+        .qr-box {
+            width: 180px; height: 180px;
+            background: #fafbfc;
+            border: 2px dashed var(--border);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            overflow: hidden;
+            transition: border-color 0.3s;
+            padding: 12px;
+        }
+        .qr-box.has-qr { border-style: solid; border-color: var(--primary); }
+        .qr-box img { width: 100%; height: 100%; object-fit: contain; border-radius: 8px; }
+        .qr-box .placeholder { color: var(--text3); font-size: 13px; text-align: center; line-height: 1.6; }
+
+        .login-info { flex: 1; min-width: 0; }
+        .login-status {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 14px; font-weight: 500;
+            margin-bottom: 12px; padding: 8px 12px;
+            border-radius: 10px;
+            background: var(--bg);
+        }
+        .login-status.success { background: var(--success-light); color: var(--success); }
+        .login-status.scanning { background: var(--primary-light); color: var(--primary); }
+        .login-status.scanned { background: var(--warn-light); color: var(--warn); }
+        .login-status.error { background: var(--danger-light); color: var(--danger); }
+
+        .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+        .verify-box {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            margin-top: 16px;
+            animation: slideUp 0.3s ease;
+        }
+        .verify-box img { max-width: 180px; border-radius: 8px; margin-bottom: 10px; }
+
+        /* IP显示 */
+        .ip-display {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--primary);
+            text-align: center;
+            padding: 16px 0 8px;
+            letter-spacing: 3px;
+        }
+        .ip-meta {
+            display: flex;
+            justify-content: space-around;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+        }
+        .ip-meta .item { text-align: center; }
+        .ip-meta .label { font-size: 12px; color: var(--text3); margin-bottom: 4px; }
+        .ip-meta .value { font-size: 14px; font-weight: 600; color: var(--text2); }
+
+        /* 应用列表 */
+        .app-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 14px;
+            background: var(--bg);
+            border-radius: 10px;
+            margin-bottom: 8px;
+            transition: background 0.2s;
+        }
+        .app-item:hover { background: #eef0f3; }
+        .app-id {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--primary);
+        }
+        .badge {
+            font-size: 11px; font-weight: 600;
+            padding: 2px 10px;
+            border-radius: 20px;
+        }
+        .badge.success { background: var(--success-light); color: var(--success); }
+        .badge.failed { background: var(--danger-light); color: var(--danger); }
+        .badge.pending { background: #f2f3f5; color: var(--text3); }
+
+        .add-row { display: flex; gap: 8px; margin-top: 14px; }
+
+        /* 历史表格 */
+        .history-table { width: 100%; border-collapse: collapse; }
+        .history-table th {
+            text-align: left; padding: 8px 10px;
+            font-size: 12px; font-weight: 600;
+            color: var(--text3); text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+        }
+        .history-table td {
+            padding: 10px; font-size: 13px;
+            border-bottom: 1px solid #f2f3f5;
+        }
+        .ip-mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        .ip-arrow { color: var(--success); font-weight: 700; padding: 0 4px; }
+
+        /* 配置 */
+        .config-row {
+            display: flex; gap: 12px; align-items: center;
+            margin-bottom: 14px;
+        }
+        .config-row label {
+            min-width: 110px; font-size: 13px;
+            font-weight: 500; color: var(--text2);
+            text-align: right;
+        }
+        .config-row .el-input { flex: 1; }
+
+        /* 日志 */
+        .log-area { grid-column: 1 / -1; }
+        .log-list {
+            max-height: 420px;
+            flex: 1;
+            min-height: 200px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12.5px;
+            line-height: 1.7;
+        }
+        .log-entry {
+            padding: 6px 16px;
+            border-bottom: 1px solid #f7f8fa;
+            display: flex; gap: 12px;
+            transition: background 0.15s;
+        }
+        .log-entry:first-child { animation: slideDown 0.25s ease; }
+        .log-entry:hover { background: #f7f8fa; }
+        .log-time { color: var(--text3); flex-shrink: 0; font-size: 12px; }
+        .log-level {
+            flex-shrink: 0; font-weight: 600;
+            min-width: 56px; font-size: 11px;
+            padding: 1px 6px; border-radius: 4px;
+            text-align: center;
+        }
+        .log-level.INFO { background: var(--primary-light); color: var(--primary); }
+        .log-level.WARN { background: var(--warn-light); color: var(--warn); }
+        .log-level.ERROR { background: var(--danger-light); color: var(--danger); }
+        .log-level.SUCCESS { background: var(--success-light); color: var(--success); }
+        .log-msg { color: var(--text2); word-break: break-all; }
+
+        /* 动画 */
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes pop {
+            0% { transform: scale(0.95); opacity: 0; }
+            60% { transform: scale(1.02); }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .card { animation: pop 0.35s ease; }
+
+        /* 通知弹窗 */
+        .notification-popup {
+            position: fixed; top: 20px; right: 20px;
+            z-index: 9999; max-width: 400px;
+            animation: slideDown 0.3s ease;
+        }
+
+        /* 滚动条 */
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+        /* Element Plus 按钮弹跳 */
+        .el-button { transition: transform 0.15s cubic-bezier(0.34,1.56,0.64,1) !important; }
+        .el-button:active { transform: scale(0.92) !important; }
+        .el-input__wrapper { transition: box-shadow 0.2s ease !important; }
+        .app-item { transition: background 0.2s, transform 0.15s cubic-bezier(0.34,1.56,0.64,1); cursor: default; }
+        .app-item:active { transform: scale(0.98); }
+        .badge { transition: transform 0.15s cubic-bezier(0.34,1.56,0.64,1); }
+        .badge:active { transform: scale(0.9); }
+        .log-entry { transition: background 0.15s, transform 0.15s cubic-bezier(0.34,1.56,0.64,1); }
+        .log-entry:active { transform: scale(0.99); }
+        .el-button--primary {
+            background: var(--primary) !important;
+            border-color: var(--primary) !important;
+        }
+        .el-button--primary:hover {
+            background: #2860e0 !important;
+            border-color: #2860e0 !important;
+        }
+
+        /* Element Plus 暗色输入框适配白色主题 */
+        .el-input__wrapper {
+            background: #fff !important;
+            border-color: var(--border) !important;
+            box-shadow: 0 0 0 1px var(--border) inset !important;
+            border-radius: 8px !important;
+        }
+        .el-input__wrapper:focus-within {
+            box-shadow: 0 0 0 2px var(--primary) inset !important;
+        }
+        .el-input__inner { color: var(--text) !important; font-size: 13px; }
+
+        .empty-tip {
+            text-align: center; padding: 32px 0;
+            color: var(--text3); font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div class="container">
+        <!-- 登录区 -->
+        <div class="card login-area">
+            <div class="card-header">
+                <h3><span class="icon" style="background:#e8f0fe;">🔐</span> 登录企业微信后台</h3>
+            </div>
+            <div class="card-body">
+                <div class="login-content">
+                    <div class="qr-box" :class="{ 'has-qr': qrImageUrl }">
+                        <img v-if="qrImageUrl" :src="qrImageUrl" />
+                        <div v-else class="placeholder">点击右侧按钮<br>生成登录二维码</div>
+                    </div>
+                    <div class="login-info">
+                        <div class="login-status"
+                             :class="{ success: loggedIn, scanning: loginStatus==='scanning'||loginStatus==='getting_qr', scanned: loginStatus==='scanned', error: loginStatus==='timeout'||loginStatus==='expired' }">
+                            <span class="status-dot" :class="loggedIn?'green':loginStatus==='scanned'?'yellow':(loginStatus==='scanning'||loginStatus==='getting_qr')?'yellow':'red'"></span>
+                            <span v-if="loggedIn">✅ 登录态有效，可自动更新</span>
+                            <span v-else-if="loginStatus==='getting_qr'">⏳ 正在获取二维码...</span>
+                            <span v-else-if="loginStatus==='scanning'">📱 二维码已生成，请扫码登录</span>
+                            <span v-else-if="loginStatus==='scanned'">📲 已扫码，请在手机端点击确认登录</span>
+                            <span v-else-if="loginStatus==='expired'">⏰ 二维码已过期，请重新扫码</span>
+                            <span v-else-if="loginStatus==='timeout'">⏰ 登录超时，请重试</span>
+                            <span v-else>❌ 未登录，请扫码登录</span>
+                        </div>
+                        <div class="btn-row">
+                            <el-button type="primary" @click="startLogin" :loading="loggingIn"
+                                       :disabled="loggedIn" round>
+                                {{ loggedIn ? '已登录 ✓' : '扫码登录' }}
+                            </el-button>
+                            <el-button @click="forceUpdate" :loading="updating"
+                                       :disabled="!loggedIn || !appIds.length" round>
+                                强制更新IP
+                            </el-button>
+                            <el-button @click="checkIP" :loading="checkingIP" round>
+                                检测当前IP
+                            </el-button>
+                            <el-button @click="checkLogin" :loading="checkingLogin" round>
+                                检查登录态
+                            </el-button>
+                            <el-button v-if="!schedulerRunning" type="success" @click="startScheduler" :loading="schedulerLoading" round>
+                                ▶ 启动定时检测
+                            </el-button>
+                            <el-button v-else type="danger" @click="stopScheduler" :loading="schedulerLoading" round>
+                                ■ 停止定时检测
+                            </el-button>
+                            <el-button v-if="loggedIn" type="danger" @click="logout" :loading="loggingOut" plain round>
+                                退出登录
+                            </el-button>
+                        </div>
+                        <div v-if="needVerification" class="verify-box">
+                            <p style="margin-bottom:10px;color:var(--warn);font-weight:600;font-size:14px;">
+                                ⚠️ 需要输入验证码
+                            </p>
+                            <img v-if="verifyImage" :src="'data:image/png;base64,' + verifyImage" />
+                            <div style="display:flex;gap:8px;margin-top:10px;">
+                                <el-input v-model="verifyCode" placeholder="请输入验证码"
+                                          @keyup.enter="submitVerifyCode" style="max-width:200px;" />
+                                <el-button type="primary" @click="submitVerifyCode"
+                                           :loading="submittingCode" round>提交</el-button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- IP状态 -->
+        <div class="card ip-area">
+            <div class="card-header">
+                <h3><span class="icon" style="background:#e8ffea;">🌐</span> 公网IP</h3>
+                <span style="font-size:12px;color:var(--text3);">每{{ checkInterval }}s检测</span>
+            </div>
+            <div class="card-body">
+                <div class="ip-display">{{ currentIp }}</div>
+                <div class="ip-meta">
+                    <div class="item">
+                        <div class="label">上次检测</div>
+                        <div class="value">{{ lastCheck || '—' }}</div>
+                    </div>
+                    <div class="item">
+                        <div class="label">应用数量</div>
+                        <div class="value">{{ appIds.length }}</div>
+                    </div>
+                    <div class="item">
+                        <div class="label">定时任务</div>
+                        <div class="value" :style="{color: schedulerRunning ? 'var(--success)' : 'var(--text3)'}">
+                            {{ schedulerRunning ? '运行中' : '未启动' }}
+                        </div>
+                    </div>
+                </div>
+                <div style="margin-top:20px;" v-if="ipHistory.length">
+                    <h4 style="font-size:13px;color:var(--text3);margin-bottom:10px;font-weight:600;">📋 变更历史</h4>
+                    <div style="overflow-x:auto;">
+                        <table class="history-table">
+                            <thead><tr><th>时间</th><th>旧IP</th><th></th><th>新IP</th><th>结果</th></tr></thead>
+                            <tbody>
+                                <tr v-for="h in ipHistory" :key="h.id">
+                                    <td style="color:var(--text3);white-space:nowrap;">{{ h.changed_at }}</td>
+                                    <td class="ip-mono" style="color:var(--danger);">{{ h.old_ip }}</td>
+                                    <td class="ip-arrow">→</td>
+                                    <td class="ip-mono" style="color:var(--success);">{{ h.new_ip }}</td>
+                                    <td style="font-size:12px;">{{ h.update_result }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 应用管理 -->
+        <div class="card apps-area">
+            <div class="card-header">
+                <h3><span class="icon" style="background:#fff7e8;">📱</span> 应用管理</h3>
+                <el-button size="small" @click="showAgentModal = true; agentModalReason = '手动添加应用AgentId';" round>
+                    手动输入
+                </el-button>
+            </div>
+            <div class="card-body">
+                <div v-if="apps.length">
+                    <div class="app-item" v-for="app in apps" :key="app.agent_id">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <span class="app-id">{{ app.agent_id }}</span>
+                            <span v-if="app.current_ip" class="ip-mono" style="color:var(--text3);font-size:12px;">
+                                {{ app.current_ip }}
+                            </span>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <span class="badge" :class="app.status || 'pending'">
+                                {{ app.status === 'success' ? '✓ 成功' : app.status === 'failed' ? '✗ 失败' : '待更新' }}
+                            </span>
+                            <el-button size="small" type="primary" @click="updateSingleApp(app.agent_id)"
+                                       :loading="updatingAppId === app.agent_id" style="font-size:12px;" round>更新</el-button>
+                            <el-button size="small" type="danger" text @click="removeApp(app.agent_id)"
+                                       style="font-size:12px;">删除</el-button>
+                        </div>
+                    </div>
+                </div>
+                <div v-else class="empty-tip">暂无应用，请点击「手动输入」添加</div>
+                <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">
+                    <el-button size="small" @click="clearApps" round>清空</el-button>
+                    <el-button type="primary" size="small" @click="saveApps" round>保存</el-button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 实时日志 -->
+        <div class="card log-area">
+            <div class="card-header">
+                <h3><span class="icon" style="background:#ffece8;">📋</span> 实时日志</h3>
+                <el-button size="small" text @click="clearLogs" style="font-size:12px;">清空</el-button>
+            </div>
+            <div class="card-body" style="padding:0;">
+                <div class="log-list" ref="logList">
+                    <div class="log-entry" v-for="log in logs" :key="log._key">
+                        <span class="log-time">{{ log.time }}</span>
+                        <span class="log-level" :class="log.level">{{ log.level }}</span>
+                        <span class="log-msg">{{ log.message }}</span>
+                    </div>
+                    <div v-if="!logs.length" class="empty-tip">暂无日志</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 底部 -->
+    <div style="text-align:center;padding:20px 0 24px;font-size:12px;color:var(--text3);">
+        Developed by <span style="font-weight:600;color:var(--text2);">JYONG</span>
+    </div>
+
+    <!-- 手动输入AgentId弹窗 -->
+    <el-dialog v-model="showAgentModal" title="" width="480px" :close-on-click-modal="false"
+               style="border-radius: 16px; overflow: hidden;">
+        <div style="padding: 8px 4px;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+                <div style="width:40px;height:40px;border-radius:12px;background:var(--primary-light);display:flex;align-items:center;justify-content:center;font-size:20px;">📱</div>
+                <div>
+                    <div style="font-size:16px;font-weight:600;color:var(--text);">配置应用AgentId</div>
+                    <div style="font-size:13px;color:var(--text3);margin-top:2px;">请输入企业微信自建应用的AgentId</div>
+                </div>
+            </div>
+            <div v-for="(item, idx) in agentInputList" :key="idx"
+                 style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+                <el-input v-model="agentInputList[idx]" :placeholder="'应用AgentId #' + (idx+1)" />
+                <el-button v-if="agentInputList.length > 1" type="danger" text @click="agentInputList.splice(idx, 1)"
+                           style="flex-shrink:0;" circle>✕</el-button>
+            </div>
+            <el-button @click="agentInputList.push('')" text type="primary" style="margin-top:4px;">
+                + 添加更多应用
+            </el-button>
+            <div style="margin-top:12px;font-size:12px;color:var(--text3);background:var(--bg);padding:10px 12px;border-radius:8px;">
+                💡 在企业微信后台 → 应用管理 → 自建应用详情页可查看AgentId（网址后的数字）
+            </div>
+        </div>
+        <template #footer>
+            <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:8px;">
+                <el-button @click="showAgentModal = false" round>取消</el-button>
+                <el-button type="primary" @click="submitAgentIds" :disabled="!hasValidAgents" round>确认添加</el-button>
+            </div>
+        </template>
+    </el-dialog>
+
+    <!-- 通知弹窗 -->
+    <div class="notification-popup" v-if="notification">
+        <el-alert :title="notification.title" :type="notification.success ? 'success' : 'error'"
+                  :closable="true" @close="notification = null" show-icon
+                  style="border-radius:12px;">
+            <template #default>
+                <pre style="white-space:pre-wrap;font-size:12px;font-family:'JetBrains Mono',monospace;">{{ notification.content }}</pre>
+            </template>
+        </el-alert>
+    </div>
+</div>
+
+<script>
+const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick } = Vue;
+
+const app = createApp({
+    setup() {
+        const loggedIn = ref(false);
+        const loggingIn = ref(false);
+        const loggingOut = ref(false);
+        const checkingLogin = ref(false);
+        const qrImage = ref('');
+        const qrImageUrl = ref('');
+        const loginStatus = ref('');
+        const needVerification = ref(false);
+        const verifyImage = ref('');
+        const verifyCode = ref('');
+        const submittingCode = ref(false);
+
+        const currentIp = ref('0.0.0.0');
+        const lastCheck = ref('');
+        const checkInterval = ref(300);
+        const checkingIP = ref(false);
+        const updatingAppId = ref('');
+        const showAgentModal = ref(false);
+        const agentModalReason = ref('');
+        const agentInputList = ref(['']);
+        const hasValidAgents = computed(() => agentInputList.value.some(s => s.trim()));
+        const ipHistory = ref([]);
+
+        const appIds = ref([]);
+        const apps = ref([]);
+        const newAppId = ref('');
+
+        const logs = ref([]);
+        const logList = ref(null);
+        const notification = ref(null);
+        const updating = ref(false);
+        const schedulerRunning = ref(false);
+        const schedulerLoading = ref(false);
+
+        let ws = null, logKey = 0, reconnectTimer = null, pingTimer = null;
+
+        function connectWS() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${proto}//${location.host}/ws`);
+            ws.onopen = () => addLogEntry('INFO', 'WebSocket 已连接');
+            ws.onmessage = (e) => { try { handleWSMessage(JSON.parse(e.data)); } catch {} };
+            ws.onclose = () => { addLogEntry('WARN', 'WebSocket 断开，5秒后重连...'); reconnectTimer = setTimeout(connectWS, 5000); };
+            ws.onerror = () => {};
+        }
+
+        function handleWSMessage(msg) {
+            switch (msg.type) {
+                case 'log': addLogEntry(msg.data.level, msg.data.message); break;
+                case 'qr_code':
+                    qrImageUrl.value = msg.data.image_url || '';
+                    loginStatus.value = 'scanning';
+                    break;
+                case 'login_status':
+                    if (msg.data.status === 'success') {
+                        loggedIn.value = true; loggingIn.value = false;
+                        loginStatus.value = ''; qrImage.value = ''; qrImageUrl.value = '';
+                        needVerification.value = false; loadStatus();
+                        addLogEntry('SUCCESS', '登录成功，自动同步应用并更新IP...');
+                    } else if (msg.data.status === 'scanned') {
+                        loginStatus.value = 'scanned';
+                    } else if (msg.data.status === 'expired') {
+                        loginStatus.value = 'expired'; loggingIn.value = false;
+                        qrImageUrl.value = '';
+                    } else if (msg.data.status === 'timeout') {
+                        loginStatus.value = 'timeout'; loggingIn.value = false;
+                        qrImageUrl.value = '';
+                    }
+                    break;
+                case 'verification_required':
+                    needVerification.value = true;
+                    verifyImage.value = msg.data.image || '';
+                    addLogEntry('WARN', '需要输入验证码');
+                    break;
+                case 'ip_changed':
+                    currentIp.value = msg.data.new_ip;
+                    loadIPHistory();
+                    break;
+                case 'ip_update_result':
+                    loadStatus(); loadIPHistory();
+                    break;
+                case 'show_agent_input':
+                    showAgentModal.value = true;
+                    agentModalReason.value = msg.data.reason || '请配置应用AgentId';
+                    if (appIds.value.length === 0) agentInputList.value = [''];
+                    addLogEntry('WARN', '请配置应用AgentId');
+                    break;
+                case 'notification':
+                    notification.value = msg.data;
+                    setTimeout(() => { notification.value = null; }, 15000);
+                    break;
+                case 'status':
+                    currentIp.value = msg.data.current_ip || currentIp.value;
+                    loggedIn.value = msg.data.logged_in || false;
+                    break;
+            }
+        }
+
+        function addLogEntry(level, message) {
+            const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            logs.value.unshift({ _key: logKey++, level, message, time });
+            if (logs.value.length > 500) logs.value = logs.value.slice(0, 300);
+        }
+
+        async function loadStatus() {
+            try {
+                const d = await (await fetch('/api/status')).json();
+                currentIp.value = d.current_ip; lastCheck.value = d.last_check;
+                checkInterval.value = d.check_interval; appIds.value = d.app_ids || [];
+                apps.value = d.apps || []; loggedIn.value = d.logged_in;
+                schedulerRunning.value = d.scheduler_running;
+            } catch {}
+        }
+        async function loadIPHistory() { try { ipHistory.value = await (await fetch('/api/ip_history')).json(); } catch {} }
+        async function loadLogs() {
+            try {
+                const d = await (await fetch('/api/logs?limit=50')).json();
+                d.forEach(l => logs.value.push({ _key: logKey++, level: l.level, message: l.message, time: l.created_at }));
+            } catch {}
+        }
+
+        function clearApps() {
+            appIds.value = [];
+            apps.value = [];
+        }
+        async function saveApps() {
+            try {
+                await fetch('/api/apps', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ app_ids: appIds.value }),
+                });
+                addLogEntry('SUCCESS', '应用列表已保存');
+            } catch { addLogEntry('ERROR', '保存失败'); }
+        }
+        async function startLogin() {
+            loggingIn.value = true; loginStatus.value = 'getting_qr';
+            try { const d = await (await fetch('/api/login', { method: 'POST' })).json(); addLogEntry('INFO', d.message || '正在获取二维码...'); }
+            catch (e) { addLogEntry('ERROR', '启动登录失败: ' + e.message); loggingIn.value = false; loginStatus.value = ''; }
+        }
+        async function checkLogin() {
+            checkingLogin.value = true;
+            try { const d = await (await fetch('/api/check_login', { method: 'POST' })).json(); loggedIn.value = d.valid; addLogEntry(d.valid ? 'SUCCESS' : 'WARN', d.valid ? '登录态有效' : '登录态已失效'); }
+            catch { addLogEntry('ERROR', '检查失败'); }
+            finally { checkingLogin.value = false; }
+        }
+        async function submitVerifyCode() {
+            if (!verifyCode.value) return; submittingCode.value = true;
+            try { const d = await (await fetch('/api/verify_code', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: verifyCode.value }) })).json(); if (d.success) { needVerification.value = false; verifyCode.value = ''; } }
+            catch { addLogEntry('ERROR', '提交失败'); }
+            finally { submittingCode.value = false; }
+        }
+        async function addApps() {
+            if (!newAppId.value) return;
+            const ids = newAppId.value.split(/[,，\s]+/).filter(s => s.trim());
+            if (!ids.length) return;
+            try { const d = await (await fetch('/api/apps', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app_ids: ids }) })).json(); appIds.value = d.app_ids || []; newAppId.value = ''; await loadStatus(); addLogEntry('SUCCESS', `已添加: ${ids.join(', ')}`); }
+            catch { addLogEntry('ERROR', '添加失败'); }
+        }
+        async function removeApp(id) {
+            try { await fetch(`/api/apps/${id}`, { method: 'DELETE' }); await loadStatus(); addLogEntry('INFO', `已删除: ${id}`); } catch {}
+        }
+        async function logout() {
+            loggingOut.value = true;
+            try {
+                const d = await (await fetch('/api/logout', { method: 'POST' })).json();
+                loggedIn.value = false;
+                loginStatus.value = '';
+                qrImageUrl.value = '';
+                appIds.value = [];
+                apps.value = [];
+                currentIp.value = '0.0.0.0';
+                logs.value = [];
+                addLogEntry('INFO', d.message || '已退出登录');
+            } catch { addLogEntry('ERROR', '退出失败'); }
+            finally { loggingOut.value = false; }
+        }
+        async function updateSingleApp(agentId) {
+            if (!currentIp.value || currentIp.value === '0.0.0.0') {
+                addLogEntry('ERROR', '请先检测当前IP');
+                return;
+            }
+            updatingAppId.value = agentId;
+            try {
+                const resp = await fetch('/api/force_update', { method: 'POST' });
+                const d = await resp.json();
+                addLogEntry('INFO', `正在更新应用 ${agentId}...`);
+            } catch { addLogEntry('ERROR', '更新失败'); }
+            finally { updatingAppId.value = ''; }
+        }
+        async function forceUpdate() {
+            updating.value = true;
+            try { const d = await (await fetch('/api/force_update', { method: 'POST' })).json(); addLogEntry('INFO', d.message); }
+            catch { addLogEntry('ERROR', '强制更新失败'); }
+            finally { updating.value = false; }
+        }
+        async function checkIP() {
+            checkingIP.value = true;
+            try { const d = await (await fetch('/api/check_ip', { method: 'POST' })).json(); currentIp.value = d.current_ip; addLogEntry(d.changed ? 'WARN' : 'INFO', d.changed ? `IP变化: ${d.current_ip} → ${d.detected_ip}` : `IP未变: ${d.current_ip}`); }
+            catch { addLogEntry('ERROR', '检测失败'); }
+            finally { checkingIP.value = false; }
+        }
+        async function submitAgentIds() {
+            const ids = agentInputList.value.map(s => s.trim()).filter(s => s);
+            if (!ids.length) return;
+            try {
+                const d = await (await fetch('/api/apps', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ app_ids: ids }),
+                })).json();
+                appIds.value = d.app_ids || [];
+                showAgentModal.value = false;
+                agentInputList.value = [''];
+                await loadStatus();
+                addLogEntry('SUCCESS', `已添加 ${ids.length} 个应用`);
+            } catch { addLogEntry('ERROR', '添加失败'); }
+        }
+        async function clearLogs() {
+            logs.value = [];
+            try { await fetch('/api/logs/clear', { method: 'POST' }); } catch {}
+        }
+
+        async function startScheduler() {
+            schedulerLoading.value = true;
+            try {
+                const d = await (await fetch('/api/scheduler/start', { method: 'POST' })).json();
+                schedulerRunning.value = d.running;
+                addLogEntry(d.running ? 'SUCCESS' : 'INFO', d.message);
+            } catch { addLogEntry('ERROR', '启动失败'); }
+            finally { schedulerLoading.value = false; }
+        }
+        async function stopScheduler() {
+            schedulerLoading.value = true;
+            try {
+                const d = await (await fetch('/api/scheduler/stop', { method: 'POST' })).json();
+                schedulerRunning.value = d.running;
+                addLogEntry('WARN', d.message);
+            } catch { addLogEntry('ERROR', '停止失败'); }
+            finally { schedulerLoading.value = false; }
+        }
+
+
+        onMounted(async () => {
+            connectWS();
+            pingTimer = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }, 30000);
+            await Promise.all([loadStatus(), loadIPHistory(), loadLogs()]);
+            // 定时刷新状态
+            setInterval(async () => {
+                await Promise.all([loadStatus()]);
+            }, 10000);
+        });
+        onUnmounted(() => { ws?.close(); clearTimeout(reconnectTimer); clearInterval(pingTimer); });
+
+        return {
+            loggedIn, loggingIn, loggingOut, checkingLogin, qrImage, qrImageUrl, loginStatus,
+            needVerification, verifyImage, verifyCode, submittingCode,
+            currentIp, lastCheck, checkInterval, checkingIP, ipHistory,
+            appIds, apps, newAppId, logs, logList,
+            notification, updating, schedulerRunning, schedulerLoading,
+            startLogin, checkLogin, submitVerifyCode, addApps, removeApp,
+            forceUpdate, checkIP, clearLogs, startScheduler, stopScheduler, clearApps, saveApps,
+            updatingAppId, updateSingleApp,
+            showAgentModal, agentModalReason, agentInputList, hasValidAgents, submitAgentIds,
+        };
+    }
+});
+app.use(ElementPlus);
+app.mount('#app');
+</script>
+</body>
+</html>
