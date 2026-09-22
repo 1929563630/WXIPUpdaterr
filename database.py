@@ -60,15 +60,18 @@ def init_db():
             id INTEGER PRIMARY KEY CHECK (id = 1),
             ip TEXT DEFAULT '0.0.0.0',
             last_check TEXT DEFAULT (datetime('now','localtime')),
-            last_change TEXT DEFAULT ''
+            last_change TEXT DEFAULT '',
+            last_login_check TEXT DEFAULT ''
         )
     """)
 
-    # 兼容旧库：检查 last_change 列是否存在，不存在就 ALTER 加列
+    # 兼容旧库：逐列检查并 ALTER
     try:
         cols = [row["name"] for row in cursor.execute("PRAGMA table_info(current_ip)").fetchall()]
         if "last_change" not in cols:
             cursor.execute("ALTER TABLE current_ip ADD COLUMN last_change TEXT DEFAULT ''")
+        if "last_login_check" not in cols:
+            cursor.execute("ALTER TABLE current_ip ADD COLUMN last_login_check TEXT DEFAULT ''")
     except Exception:
         pass
 
@@ -131,8 +134,9 @@ def get_current_ip() -> dict:
         result = dict(row)
         # 兜底字段，兼容旧库
         result.setdefault("last_change", "")
+        result.setdefault("last_login_check", "")
         return result
-    return {"ip": "0.0.0.0", "last_check": "", "last_change": ""}
+    return {"ip": "0.0.0.0", "last_check": "", "last_change": "", "last_login_check": ""}
 
 
 def update_current_ip(ip: str, ip_changed: bool = False):
@@ -165,6 +169,22 @@ def update_current_ip(ip: str, ip_changed: bool = False):
         """, (ip,))
     conn.commit()
     conn.close()
+
+
+def update_login_check_time():
+    """刷新'上次登录检测'时间（每次登录态检查跑完都调用）"""
+    conn = get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO current_ip (id, last_login_check) VALUES (1, datetime('now','localtime'))
+            ON CONFLICT(id) DO UPDATE SET
+                last_login_check = datetime('now','localtime')
+        """)
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 
 def add_ip_history(old_ip: str, new_ip: str, result: str = ""):
