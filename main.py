@@ -51,6 +51,34 @@ ws_clients = set()
 scheduler = AsyncIOScheduler()
 
 
+def get_effective_settings() -> dict:
+    """获取当前生效的运行参数（用户配置优先，否则用默认值）"""
+    cfg = load_user_config()
+    try:
+        ip_interval = int(cfg.get("ip_check_interval", IP_CHECK_INTERVAL))
+    except (ValueError, TypeError):
+        ip_interval = IP_CHECK_INTERVAL
+    try:
+        report_interval = int(cfg.get("status_report_interval", STATUS_REPORT_INTERVAL))
+    except (ValueError, TypeError):
+        report_interval = STATUS_REPORT_INTERVAL
+    report_enabled = bool(cfg.get("status_report_enabled", True))
+    report_on_start = bool(cfg.get("status_report_on_start", STATUS_REPORT_ON_START))
+
+    # 保护性下限
+    if ip_interval < 30:
+        ip_interval = 30
+    if report_interval < 60:
+        report_interval = 60
+
+    return {
+        "ip_check_interval": ip_interval,
+        "status_report_enabled": report_enabled,
+        "status_report_interval": report_interval,
+        "status_report_on_start": report_on_start,
+    }
+
+
 def _has_login_expired(results):
     for r in results or []:
         msg = r.get("message") or ""
@@ -78,8 +106,12 @@ async def ip_check_job():
             return
         current = get_current_ip()
         old_ip = current.get("ip", "0.0.0.0")
-        if new_ip == old_ip:
+        ip_changed = (new_ip != old_ip)
+
+        if not ip_changed:
+            update_current_ip(new_ip, ip_changed=False)
             return
+
         logger.info(f"检测到IP变化: {old_ip} -> {new_ip}")
         add_log("INFO", f"检测到公网IP变化: {old_ip} -> {new_ip}")
         await ws_broadcast("log", {"level": "INFO", "message": f"检测到IP变化: {old_ip} -> {new_ip}"})
@@ -92,7 +124,7 @@ async def ip_check_job():
         if not app_ids and not apps:
             add_log("WARN", "没有配置应用ID，跳过更新")
             await ws_broadcast("log", {"level": "WARN", "message": "没有配置应用ID，跳过更新"})
-            update_current_ip(new_ip)
+            update_current_ip(new_ip, ip_changed=True)
             return
 
         for aid in app_ids:
@@ -106,7 +138,7 @@ async def ip_check_job():
             if not result["success"]:
                 all_success = False
 
-        update_current_ip(new_ip)
+        update_current_ip(new_ip, ip_changed=True)
         add_ip_history(old_ip, new_ip, "全部成功" if all_success else "部分失败")
 
         await send_notification(old_ip, new_ip, results, ws_broadcast)
@@ -121,7 +153,7 @@ async def ip_check_job():
 
 
 async def status_report_job():
-    """定期运行状态汇报（传真实状态给通知层）"""
+    """定期运行状态汇报"""
     try:
         await notify_status_report(
             ws_broadcast,
@@ -134,6 +166,44 @@ async def status_report_job():
         add_log("ERROR", f"状态汇报异常: {e}")
 
 
+async def _reschedule_jobs():
+    """根据当前有效设置重新排期定时任务"""
+    settings = get_effective_settings()
+    try:
+        # IP 检测任务（一直有）
+        scheduler.add_job(
+            ip_check_job,
+            IntervalTrigger(seconds=settings["ip_check_interval"]),
+            id="ip_check",
+            name="公网IP检测",
+            replace_existing=True,
+        )
+
+        # 状态汇报任务：根据开关决定是否注册
+        if settings["status_report_enabled"]:
+            scheduler.add_job(
+                status_report_job,
+                IntervalTrigger(seconds=settings["status_report_interval"]),
+                id="status_report",
+                name="运行状态汇报",
+                replace_existing=True,
+            )
+        else:
+            # 关掉：从调度器移除（如果存在）
+            try:
+                scheduler.remove_job("status_report")
+            except Exception:
+                pass
+
+        add_log(
+            "INFO",
+            f"定时任务已重新排期: IP检测 {settings['ip_check_interval']}s, "
+            f"状态汇报 {'每 ' + str(settings['status_report_interval']) + 's' if settings['status_report_enabled'] else '已关闭'}"
+        )
+    except Exception as e:
+        logger.error(f"重新排期任务失败: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -141,30 +211,36 @@ async def lifespan(app: FastAPI):
         browser_manager.set_ws_broadcast(ws_broadcast)
         ip_updater.set_ws_broadcast(ws_broadcast)
 
+        settings = get_effective_settings()
+
         scheduler.add_job(
             ip_check_job,
-            IntervalTrigger(seconds=IP_CHECK_INTERVAL),
+            IntervalTrigger(seconds=settings["ip_check_interval"]),
             id="ip_check",
             name="公网IP检测",
             replace_existing=True,
         )
-        scheduler.add_job(
-            status_report_job,
-            IntervalTrigger(seconds=STATUS_REPORT_INTERVAL),
-            id="status_report",
-            name="运行状态汇报",
-            replace_existing=True,
-        )
+
+        if settings["status_report_enabled"]:
+            scheduler.add_job(
+                status_report_job,
+                IntervalTrigger(seconds=settings["status_report_interval"]),
+                id="status_report",
+                name="运行状态汇报",
+                replace_existing=True,
+            )
 
         scheduler.start()
-        add_log("INFO", f"服务启动，IP检测每 {IP_CHECK_INTERVAL}s，状态汇报每 {STATUS_REPORT_INTERVAL}s")
+        add_log(
+            "INFO",
+            f"服务启动，IP检测每 {settings['ip_check_interval']}s，"
+            f"状态汇报 {'每 ' + str(settings['status_report_interval']) + 's' if settings['status_report_enabled'] else '已关闭'}"
+        )
         logger.info(f"服务启动: http://0.0.0.0:{WEB_PORT}")
 
-        # 关键改动：通知和首次任务都用 create_task，不阻塞 lifespan
-        # 这样 uvicorn 会立刻开始接收请求，Web 页面秒开
         asyncio.create_task(notify_startup(ws_broadcast, WEB_PORT))
         asyncio.create_task(ip_check_job())
-        if STATUS_REPORT_ON_START:
+        if settings["status_report_enabled"] and settings["status_report_on_start"]:
             asyncio.create_task(notify_status_report(
                 ws_broadcast,
                 reason="服务启动",
@@ -215,6 +291,8 @@ async def api_status():
     current = get_current_ip()
     config = load_user_config()
     apps = get_apps()
+    settings = get_effective_settings()
+
     if not browser_manager._login_checked:
         browser_manager._login_checked = True
         auth_file = os.path.join(DATA_DIR, "auth_state.json")
@@ -222,16 +300,69 @@ async def api_status():
             browser_manager._logged_in = await browser_manager.check_login_valid()
         else:
             browser_manager._logged_in = False
+
     return JSONResponse({
         "current_ip": current.get("ip", "0.0.0.0"),
         "last_check": current.get("last_check", ""),
+        "last_change": current.get("last_change", ""),
         "app_ids": config.get("app_ids", []),
         "apps": apps,
         "logged_in": browser_manager._logged_in,
-        "check_interval": IP_CHECK_INTERVAL,
-        "status_report_interval": STATUS_REPORT_INTERVAL,
+        "check_interval": settings["ip_check_interval"],
+        "status_report_enabled": settings["status_report_enabled"],
+        "status_report_interval": settings["status_report_interval"],
+        "status_report_on_start": settings["status_report_on_start"],
         "scheduler_running": scheduler.running,
     })
+
+
+@app.get("/api/settings")
+async def api_get_settings():
+    """获取当前运行参数"""
+    return JSONResponse(get_effective_settings())
+
+
+@app.post("/api/settings")
+async def api_save_settings(data: dict):
+    """保存运行参数并重新排期"""
+    cfg = load_user_config()
+    changed = False
+
+    if "ip_check_interval" in data:
+        try:
+            v = int(data["ip_check_interval"])
+            if v < 30:
+                v = 30
+            cfg["ip_check_interval"] = v
+            changed = True
+        except (ValueError, TypeError):
+            return JSONResponse({"success": False, "message": "IP检测间隔必须为整数"}, status_code=400)
+
+    if "status_report_enabled" in data:
+        cfg["status_report_enabled"] = bool(data["status_report_enabled"])
+        changed = True
+
+    if "status_report_interval" in data:
+        try:
+            v = int(data["status_report_interval"])
+            if v < 60:
+                v = 60
+            cfg["status_report_interval"] = v
+            changed = True
+        except (ValueError, TypeError):
+            return JSONResponse({"success": False, "message": "状态汇报间隔必须为整数"}, status_code=400)
+
+    if "status_report_on_start" in data:
+        cfg["status_report_on_start"] = bool(data["status_report_on_start"])
+        changed = True
+
+    if changed:
+        save_user_config(cfg)
+        await _reschedule_jobs()
+        add_log("INFO", "运行参数已更新")
+        await ws_broadcast("log", {"level": "SUCCESS", "message": "运行参数已保存，定时任务已重新排期"})
+
+    return JSONResponse({"success": True, "settings": get_effective_settings()})
 
 
 @app.get("/api/logs")
@@ -353,7 +484,7 @@ async def api_scheduler_stop():
 
 @app.post("/api/status_report")
 async def api_status_report():
-    """手动触发一次状态汇报（传真实状态）"""
+    """手动触发一次状态汇报"""
     asyncio.create_task(notify_status_report(
         ws_broadcast,
         reason="手动触发",
@@ -405,7 +536,7 @@ async def _do_force_update():
     for app_id in app_ids:
         result = await ip_updater.update_trusted_ip(app_id, new_ip)
         results.append({"app_id": app_id, **result})
-    update_current_ip(new_ip)
+    update_current_ip(new_ip, ip_changed=(old_ip != new_ip))
     add_ip_history(old_ip, new_ip, "手动强制更新")
 
     await send_notification(old_ip, new_ip, results, ws_broadcast)
@@ -453,5 +584,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 if __name__ == "__main__":
+    main_settings = get_effective_settings()
+    logger.info(
+        f"有效配置: IP检测 {main_settings['ip_check_interval']}s, "
+        f"状态汇报 {'每 ' + str(main_settings['status_report_interval']) + 's' if main_settings['status_report_enabled'] else '已关闭'}"
+    )
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=WEB_PORT, log_level="info")
