@@ -646,21 +646,41 @@ async def notify_status_report(
     """
     try:
         from database import get_current_ip, get_apps
-        from config import IP_CHECK_INTERVAL as _DEFAULT_IP_INTERVAL
-        from config import load_user_config as _load_cfg
+        from config import (
+            IP_CHECK_INTERVAL as _DEF_IP,
+            STATUS_REPORT_INTERVAL as _DEF_REPORT,
+            STATUS_REPORT_ON_START as _DEF_ON_START,
+            load_user_config as _load_cfg,
+        )
     except Exception as e:
         title = "📊 运行状态汇报"
         content = f"时间: {_now()}\n错误: 读取状态失败 {e}"
         await _multi_channel_push(title, content)
         return content
 
-    # 当前生效的 IP 检测间隔（用户配置优先）
+    # ---------- 读取所有生效参数 ----------
     try:
-        _user_cfg = _load_cfg()
-        ip_interval = int(_user_cfg.get("ip_check_interval", _DEFAULT_IP_INTERVAL))
+        cfg = _load_cfg()
     except Exception:
-        ip_interval = _DEFAULT_IP_INTERVAL
+        cfg = {}
 
+    def _int(key, default):
+        try:
+            return int(cfg.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
+    def _bool(key, default):
+        return bool(cfg.get(key, default))
+
+    ip_interval = _int("ip_check_interval", _DEF_IP)
+    login_enabled = _bool("login_check_enabled", True)
+    login_interval = _int("login_check_interval", 1800)
+    report_enabled = _bool("status_report_enabled", True)
+    report_interval = _int("status_report_interval", _DEF_REPORT)
+    report_on_start = _bool("status_report_on_start", _DEF_ON_START)
+
+    # ---------- 当前 IP 与登录态 ----------
     try:
         current = get_current_ip() or {}
     except Exception:
@@ -673,8 +693,8 @@ async def notify_status_report(
     cur_ip = current.get("ip", "0.0.0.0")
     last_check = current.get("last_check", "") or "—"
     last_change = current.get("last_change", "") or "—"
+    last_login_check = current.get("last_login_check", "") or "—"
 
-    # 登录态：用传入的 browser_manager 实时检查
     logged_in = False
     if browser_manager is not None:
         try:
@@ -685,7 +705,7 @@ async def notify_status_report(
             logged_in = bool(browser_manager._logged_in)
     login_text = "✅ 有效" if logged_in else "❌ 已失效（请重新扫码）"
 
-    # 应用明细
+    # ---------- 应用明细 ----------
     app_lines = []
     if apps:
         for a in apps:
@@ -697,7 +717,7 @@ async def notify_status_report(
     else:
         app_lines.append("  （未配置任何应用）")
 
-    # 定时任务状态
+    # ---------- 定时任务状态 ----------
     if scheduler_running is True:
         sched_text = "✅ 运行中"
     elif scheduler_running is False:
@@ -705,18 +725,37 @@ async def notify_status_report(
     else:
         sched_text = "—"
 
+    # ---------- 参数显示文本 ----------
+    login_enabled_text = "✅ 已启用" if login_enabled else "⏸ 已关闭"
+    report_enabled_text = "✅ 已启用" if report_enabled else "⏸ 已关闭"
+    report_on_start_text = "✅ 是" if report_on_start else "❌ 否"
+
+    # ---------- 拼装 ----------
     title = f"📊 运行状态汇报（{reason}）"
     lines = [
         f"时间: {_now()}",
         "",
-        f"🌐 当前公网IP: {cur_ip}",
-        f"🕒 上次检测: {last_check}",
-        f"📅 上次变更: {last_change}",
-        f"🔐 微信登录态: {login_text}",
-        f"⏱ 检测间隔: {ip_interval}s",
-        f"📋 定时任务: {sched_text}",
+        "━━━ 🌐 公网IP ━━━",
+        f"  当前公网IP: {cur_ip}",
+        f"  上次检测: {last_check}",
+        f"  上次变更: {last_change}",
         "",
-        f"📱 应用可信IP（共 {len(apps)} 个）:",
+        "━━━ 🔐 登录态 ━━━",
+        f"  微信登录态: {login_text}",
+        f"  上次登录检测: {last_login_check}",
+        "",
+        "━━━ ⚙️ 运行参数 ━━━",
+        f"  📡 IP检测间隔: {ip_interval}s",
+        f"  🔐 登录态检查: {login_enabled_text}",
+        f"     检查间隔: {login_interval}s" if login_enabled else "     检查间隔: —",
+        f"  📊 状态汇报: {report_enabled_text}",
+        f"     汇报间隔: {report_interval}s" if report_enabled else "     汇报间隔: —",
+        f"  🚀 启动时立即汇报: {report_on_start_text}",
+        "",
+        "━━━ 📋 定时任务 ━━━",
+        f"  {sched_text}",
+        "",
+        f"━━━ 📱 应用可信IP（共 {len(apps)} 个）━━━",
     ]
     lines.extend(app_lines)
     content = "\n".join(lines)
