@@ -59,9 +59,41 @@ def init_db():
         CREATE TABLE IF NOT EXISTS current_ip (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             ip TEXT DEFAULT '0.0.0.0',
-            last_check TEXT DEFAULT (datetime('now','localtime'))
+            last_check TEXT DEFAULT (datetime('now','localtime')),
+            last_change TEXT DEFAULT ''
         )
     """)
+
+    # 兼容旧库：检查 last_change 列是否存在，不存在就 ALTER 加列
+    try:
+        cols = [row["name"] for row in cursor.execute("PRAGMA table_info(current_ip)").fetchall()]
+        if "last_change" not in cols:
+            cursor.execute("ALTER TABLE current_ip ADD COLUMN last_change TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+    # 迁移：如果 last_change 为空，从 ip_history 取最近一次变更时间填充
+    try:
+        row = cursor.execute(
+            "SELECT last_change, last_check FROM current_ip WHERE id = 1"
+        ).fetchone()
+        if row is not None:
+            lc = row["last_change"] if "last_change" in row.keys() else ""
+            if not lc:
+                hist = cursor.execute(
+                    "SELECT changed_at FROM ip_history ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if hist and hist["changed_at"]:
+                    cursor.execute(
+                        "UPDATE current_ip SET last_change = ? WHERE id = 1",
+                        (hist["changed_at"],),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE current_ip SET last_change = last_check WHERE id = 1"
+                    )
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()
@@ -74,8 +106,8 @@ def add_log(level: str, message: str):
         "INSERT INTO logs (level, message) VALUES (?, ?)",
         (level, message)
     )
-    # 保留最新1000条
-    conn.execute("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 1000)")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 1000)")
     conn.commit()
     conn.close()
 
@@ -96,17 +128,41 @@ def get_current_ip() -> dict:
     row = conn.execute("SELECT * FROM current_ip WHERE id = 1").fetchone()
     conn.close()
     if row:
-        return dict(row)
-    return {"ip": "0.0.0.0", "last_check": ""}
+        result = dict(row)
+        # 兜底字段，兼容旧库
+        result.setdefault("last_change", "")
+        return result
+    return {"ip": "0.0.0.0", "last_check": "", "last_change": ""}
 
 
-def update_current_ip(ip: str):
-    """更新当前IP"""
+def update_current_ip(ip: str, ip_changed: bool = False):
+    """
+    更新当前IP。
+
+    参数：
+    - ip: 新的公网IP
+    - ip_changed: 本次 IP 是否真的发生了变化
+        - True  → 同时刷新 last_change
+        - False → 只刷新 last_check
+    """
     conn = get_conn()
-    conn.execute("""
-        INSERT INTO current_ip (id, ip, last_check) VALUES (1, ?, datetime('now','localtime'))
-        ON CONFLICT(id) DO UPDATE SET ip = ?, last_check = datetime('now','localtime')
-    """, (ip, ip))
+    if ip_changed:
+        conn.execute("""
+            INSERT INTO current_ip (id, ip, last_check, last_change)
+            VALUES (1, ?, datetime('now','localtime'), datetime('now','localtime'))
+            ON CONFLICT(id) DO UPDATE SET
+                ip = excluded.ip,
+                last_check = datetime('now','localtime'),
+                last_change = datetime('now','localtime')
+        """, (ip,))
+    else:
+        conn.execute("""
+            INSERT INTO current_ip (id, ip, last_check, last_change)
+            VALUES (1, ?, datetime('now','localtime'), '')
+            ON CONFLICT(id) DO UPDATE SET
+                ip = excluded.ip,
+                last_check = datetime('now','localtime')
+        """, (ip,))
     conn.commit()
     conn.close()
 
