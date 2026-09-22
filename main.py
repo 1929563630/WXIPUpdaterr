@@ -169,23 +169,24 @@ async def ip_check_job():
 async def login_check_job():
     """
     低频检查企业微信登录态。
-
-    行为：
-    - 未登录（auth_state.json 不存在）时跳过，不算"失效"；
-    - 状态从"有效 → 失效"时发通知；
-    - 状态从"失效 → 有效"时记一条恢复日志；
-    - 首次运行时只记录状态，不发通知（避免启动即误报）。
     """
     global _last_login_state
     try:
         auth_file = os.path.join(DATA_DIR, "auth_state.json")
         if not os.path.exists(auth_file):
-            # 从未登录过，跳过
+            # 从未登录过，跳过（不刷新检测时间，因为没有"检测"可言）
             return
 
         valid = await browser_manager.check_login_valid()
         browser_manager._logged_in = valid
         browser_manager._login_checked = True
+
+        # 刷新"上次登录检测"时间
+        try:
+            from database import update_login_check_time
+            update_login_check_time()
+        except Exception:
+            pass
 
         # 首次运行：只记录，不通知
         if _last_login_state is None:
@@ -392,6 +393,7 @@ async def api_status():
         "current_ip": current.get("ip", "0.0.0.0"),
         "last_check": current.get("last_check", ""),
         "last_change": current.get("last_change", ""),
+        "last_login_check": current.get("last_login_check", ""),   # ← 新增
         "app_ids": config.get("app_ids", []),
         "apps": apps,
         "logged_in": browser_manager._logged_in,
@@ -566,6 +568,12 @@ async def api_submit_code(data: dict):
 @app.post("/api/check_login")
 async def api_check_login():
     valid = await browser_manager.check_login_valid()
+    # 手动检查也刷新"上次登录检测"时间
+    try:
+        from database import update_login_check_time
+        update_login_check_time()
+    except Exception:
+        pass
     return JSONResponse({"valid": valid})
 
 
