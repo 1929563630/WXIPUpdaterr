@@ -65,3 +65,9 @@ def save_user_config(config: dict):
     import json
     with open(USER_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+
+# 状态汇报间隔（秒），默认 1 小时。可通过环境变量覆盖
+STATUS_REPORT_INTERVAL = int(os.environ.get("STATUS_REPORT_INTERVAL", 3600))
+
+# 是否在服务启动时立即发送一次状态汇报
+STATUS_REPORT_ON_START = True        
