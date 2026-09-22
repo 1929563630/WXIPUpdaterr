@@ -179,9 +179,9 @@
             padding-top: 16px;
             border-top: 1px solid var(--border);
         }
-        .ip-meta .item { text-align: center; }
+        .ip-meta .item { text-align: center; flex: 1; }
         .ip-meta .label { font-size: 12px; color: var(--text3); margin-bottom: 4px; }
-        .ip-meta .value { font-size: 14px; font-weight: 600; color: var(--text2); }
+        .ip-meta .value { font-size: 13px; font-weight: 600; color: var(--text2); }
 
         .app-item {
             display: flex;
@@ -327,6 +327,36 @@
             text-align: center; padding: 32px 0;
             color: var(--text3); font-size: 13px;
         }
+
+        .settings-section {
+            padding: 14px 16px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            margin-bottom: 16px;
+            background: #fafbfc;
+        }
+        .settings-section.disabled {
+            opacity: 0.55;
+            background: #f7f8fa;
+        }
+        .settings-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .settings-row:last-child { margin-bottom: 0; }
+        .settings-row .title {
+            font-size: 13px;
+            color: var(--text2);
+            font-weight: 500;
+        }
+        .settings-hint {
+            font-size: 12px;
+            color: var(--text3);
+            margin-top: 6px;
+            line-height: 1.5;
+        }
     </style>
 </head>
 <body>
@@ -401,7 +431,10 @@
         <div class="card ip-area">
             <div class="card-header">
                 <h3><span class="icon" style="background:#e8ffea;">🌐</span> 公网IP</h3>
-                <span style="font-size:12px;color:var(--text3);">每{{ checkInterval }}s检测</span>
+                <div style="display:flex;gap:10px;align-items:center;">
+                    <span style="font-size:12px;color:var(--text3);">每{{ checkInterval }}s检测</span>
+                    <el-button size="small" @click="openSettings" round>⚙️ 参数</el-button>
+                </div>
             </div>
             <div class="card-body">
                 <div class="ip-display">{{ currentIp }}</div>
@@ -409,6 +442,10 @@
                     <div class="item">
                         <div class="label">上次检测</div>
                         <div class="value">{{ lastCheck || '—' }}</div>
+                    </div>
+                    <div class="item">
+                        <div class="label">上次变更</div>
+                        <div class="value">{{ lastChange || '—' }}</div>
                     </div>
                     <div class="item">
                         <div class="label">应用数量</div>
@@ -501,6 +538,59 @@
         Developed by <span style="font-weight:600;color:var(--text2);">JYONG</span>
     </div>
 
+    <!-- 运行参数设置弹窗 -->
+    <el-dialog v-model="showSettings" title="⚙️ 运行参数设置" width="480px" :close-on-click-modal="false"
+               style="border-radius: 16px;">
+        <div style="padding: 4px 6px;">
+            <!-- IP 检测间隔 -->
+            <div class="settings-section">
+                <div class="settings-row">
+                    <span class="title">📡 IP检测间隔（秒）</span>
+                    <el-input-number v-model="cfgIpInterval" :min="30" :max="86400" :step="30"
+                                     size="small" controls-position="right" style="width:160px;" />
+                </div>
+                <div class="settings-hint">
+                    多久检测一次公网IP变化。默认 300（5分钟），最小 30。
+                </div>
+            </div>
+
+            <!-- 状态汇报总开关 -->
+            <div class="settings-section" :class="{ disabled: !cfgReportEnabled }">
+                <div class="settings-row">
+                    <span class="title">📊 启用状态汇报</span>
+                    <el-switch v-model="cfgReportEnabled" />
+                </div>
+                <div class="settings-hint">
+                    关闭后，定时状态汇报任务将被移除，不再定期推送运行状态（可随时手动触发）。
+                </div>
+
+                <div class="settings-row" style="margin-top:14px;">
+                    <span class="title">⏱ 状态汇报间隔（秒）</span>
+                    <el-input-number v-model="cfgReportInterval" :min="60" :max="604800" :step="600"
+                                     size="small" controls-position="right" style="width:160px;"
+                                     :disabled="!cfgReportEnabled" />
+                </div>
+                <div class="settings-hint">
+                    多久推送一次运行状态汇报。默认 3600（1小时），最小 60。
+                </div>
+
+                <div class="settings-row" style="margin-top:14px;">
+                    <span class="title">🚀 启动时立即汇报</span>
+                    <el-switch v-model="cfgReportOnStart" :disabled="!cfgReportEnabled" />
+                </div>
+                <div class="settings-hint">
+                    服务启动后是否立刻发一条状态汇报。
+                </div>
+            </div>
+        </div>
+        <template #footer>
+            <div style="display:flex;gap:8px;justify-content:flex-end;">
+                <el-button @click="showSettings = false" round>取消</el-button>
+                <el-button type="primary" @click="saveSettings" :loading="savingSettings" round>保存并应用</el-button>
+            </div>
+        </template>
+    </el-dialog>
+
     <!-- 手动输入AgentId弹窗 -->
     <el-dialog v-model="showAgentModal" title="" width="480px" :close-on-click-modal="false"
                style="border-radius: 16px; overflow: hidden;">
@@ -564,7 +654,11 @@ const app = createApp({
 
         const currentIp = ref('0.0.0.0');
         const lastCheck = ref('');
+        const lastChange = ref('');
         const checkInterval = ref(300);
+        const statusReportEnabled = ref(true);
+        const statusReportInterval = ref(3600);
+        const statusReportOnStart = ref(true);
         const checkingIP = ref(false);
         const updatingAppId = ref('');
         const showAgentModal = ref(false);
@@ -572,6 +666,14 @@ const app = createApp({
         const agentInputList = ref(['']);
         const hasValidAgents = computed(() => agentInputList.value.some(s => s.trim()));
         const ipHistory = ref([]);
+
+        // 运行参数设置
+        const showSettings = ref(false);
+        const savingSettings = ref(false);
+        const cfgIpInterval = ref(300);
+        const cfgReportEnabled = ref(true);
+        const cfgReportInterval = ref(3600);
+        const cfgReportOnStart = ref(true);
 
         const appIds = ref([]);
         const apps = ref([]);
@@ -627,6 +729,7 @@ const app = createApp({
                 case 'ip_changed':
                     currentIp.value = msg.data.new_ip;
                     loadIPHistory();
+                    loadStatus();
                     break;
                 case 'ip_update_result':
                     loadStatus(); loadIPHistory();
@@ -657,9 +760,16 @@ const app = createApp({
         async function loadStatus() {
             try {
                 const d = await (await fetch('/api/status')).json();
-                currentIp.value = d.current_ip; lastCheck.value = d.last_check;
-                checkInterval.value = d.check_interval; appIds.value = d.app_ids || [];
-                apps.value = d.apps || []; loggedIn.value = d.logged_in;
+                currentIp.value = d.current_ip;
+                lastCheck.value = d.last_check;
+                lastChange.value = d.last_change;
+                checkInterval.value = d.check_interval || 300;
+                statusReportEnabled.value = d.status_report_enabled !== false;
+                statusReportInterval.value = d.status_report_interval || 3600;
+                statusReportOnStart.value = d.status_report_on_start !== false;
+                appIds.value = d.app_ids || [];
+                apps.value = d.apps || [];
+                loggedIn.value = d.logged_in;
                 schedulerRunning.value = d.scheduler_running;
             } catch {}
         }
@@ -698,10 +808,7 @@ const app = createApp({
         }
         async function submitVerifyCode() {
             const code = (verifyCode.value || '').trim();
-            if (!code) {
-                addLogEntry('WARN', '请输入验证码');
-                return;
-            }
+            if (!code) { addLogEntry('WARN', '请输入验证码'); return; }
             submittingCode.value = true;
             addLogEntry('INFO', `正在提交验证码: ${code}`);
             try {
@@ -714,7 +821,6 @@ const app = createApp({
                 if (d.success) {
                     addLogEntry('SUCCESS', d.message || '验证码已提交，等待登录结果...');
                     verifyCode.value = '';
-                    // 不关闭验证码框，等 login_status: success 再关
                 } else {
                     addLogEntry('ERROR', d.message || '提交失败');
                 }
@@ -744,6 +850,8 @@ const app = createApp({
                 appIds.value = [];
                 apps.value = [];
                 currentIp.value = '0.0.0.0';
+                lastCheck.value = '';
+                lastChange.value = '';
                 logs.value = [];
                 addLogEntry('INFO', d.message || '已退出登录');
             } catch { addLogEntry('ERROR', '退出失败'); }
@@ -770,7 +878,7 @@ const app = createApp({
         }
         async function checkIP() {
             checkingIP.value = true;
-            try { const d = await (await fetch('/api/check_ip', { method: 'POST' })).json(); currentIp.value = d.current_ip; addLogEntry(d.changed ? 'WARN' : 'INFO', d.changed ? `IP变化: ${d.current_ip} → ${d.detected_ip}` : `IP未变: ${d.current_ip}`); }
+            try { const d = await (await fetch('/api/check_ip', { method: 'POST' })).json(); currentIp.value = d.current_ip; addLogEntry(d.changed ? 'WARN' : 'INFO', d.changed ? `IP变化: ${d.current_ip} → ${d.detected_ip}` : `IP未变: ${d.current_ip}`); await loadStatus(); }
             catch { addLogEntry('ERROR', '检测失败'); }
             finally { checkingIP.value = false; }
         }
@@ -814,6 +922,43 @@ const app = createApp({
             finally { schedulerLoading.value = false; }
         }
 
+        // ---- 运行参数设置 ----
+        function openSettings() {
+            cfgIpInterval.value = checkInterval.value;
+            cfgReportEnabled.value = statusReportEnabled.value;
+            cfgReportInterval.value = statusReportInterval.value;
+            cfgReportOnStart.value = statusReportOnStart.value;
+            showSettings.value = true;
+        }
+
+        async function saveSettings() {
+            savingSettings.value = true;
+            try {
+                const resp = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        ip_check_interval: cfgIpInterval.value,
+                        status_report_enabled: cfgReportEnabled.value,
+                        status_report_interval: cfgReportInterval.value,
+                        status_report_on_start: cfgReportOnStart.value,
+                    }),
+                });
+                const d = await resp.json();
+                if (d.success) {
+                    addLogEntry('SUCCESS', '运行参数已保存，定时任务已重新排期');
+                    showSettings.value = false;
+                    await loadStatus();
+                } else {
+                    addLogEntry('ERROR', '保存失败: ' + (d.message || '未知错误'));
+                }
+            } catch (e) {
+                addLogEntry('ERROR', '保存失败: ' + (e && e.message ? e.message : e));
+            } finally {
+                savingSettings.value = false;
+            }
+        }
+
         onMounted(async () => {
             connectWS();
             pingTimer = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' })); }, 30000);
@@ -827,13 +972,18 @@ const app = createApp({
         return {
             loggedIn, loggingIn, loggingOut, checkingLogin, qrImage, qrImageUrl, loginStatus,
             needVerification, verifyImage, verifyCode, submittingCode,
-            currentIp, lastCheck, checkInterval, checkingIP, ipHistory,
+            currentIp, lastCheck, lastChange, checkInterval,
+            statusReportEnabled, statusReportInterval, statusReportOnStart,
+            checkingIP, ipHistory,
             appIds, apps, newAppId, logs, logList,
             notification, updating, schedulerRunning, schedulerLoading,
             startLogin, checkLogin, submitVerifyCode, addApps, removeApp,
             forceUpdate, checkIP, clearLogs, startScheduler, stopScheduler, clearApps, saveApps,
             updatingAppId, updateSingleApp,
             showAgentModal, agentModalReason, agentInputList, hasValidAgents, submitAgentIds,
+            showSettings, savingSettings, cfgIpInterval,
+            cfgReportEnabled, cfgReportInterval, cfgReportOnStart,
+            openSettings, saveSettings,
         };
     }
 });
