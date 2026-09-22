@@ -339,6 +339,7 @@
             opacity: 0.55;
             background: #f7f8fa;
         }
+        .settings-section:last-child { margin-bottom: 0; }
         .settings-row {
             display: flex;
             align-items: center;
@@ -539,9 +540,9 @@
     </div>
 
     <!-- 运行参数设置弹窗 -->
-    <el-dialog v-model="showSettings" title="⚙️ 运行参数设置" width="480px" :close-on-click-modal="false"
+    <el-dialog v-model="showSettings" title="⚙️ 运行参数设置" width="520px" :close-on-click-modal="false"
                style="border-radius: 16px;">
-        <div style="padding: 4px 6px;">
+        <div style="padding: 4px 6px; max-height: 70vh; overflow-y: auto;">
             <!-- IP 检测间隔 -->
             <div class="settings-section">
                 <div class="settings-row">
@@ -554,7 +555,29 @@
                 </div>
             </div>
 
-            <!-- 状态汇报总开关 -->
+            <!-- 登录态检查 -->
+            <div class="settings-section" :class="{ disabled: !cfgLoginCheckEnabled }">
+                <div class="settings-row">
+                    <span class="title">🔐 启用登录态检查</span>
+                    <el-switch v-model="cfgLoginCheckEnabled" />
+                </div>
+                <div class="settings-hint">
+                    独立于 IP 检测，定期检查企业微信 Cookie 是否还有效。发现失效时主动通知。
+                </div>
+
+                <div class="settings-row" style="margin-top:14px;">
+                    <span class="title">⏱ 检查间隔（秒）</span>
+                    <el-input-number v-model="cfgLoginCheckInterval" :min="300" :max="86400" :step="300"
+                                     size="small" controls-position="right" style="width:160px;"
+                                     :disabled="!cfgLoginCheckEnabled" />
+                </div>
+                <div class="settings-hint">
+                    多久检查一次登录态。默认 1800（30分钟），最小 300（5分钟）。
+                    不建议设太短，避免频繁访问企业微信后台触发风控。
+                </div>
+            </div>
+
+            <!-- 状态汇报 -->
             <div class="settings-section" :class="{ disabled: !cfgReportEnabled }">
                 <div class="settings-row">
                     <span class="title">📊 启用状态汇报</span>
@@ -656,6 +679,8 @@ const app = createApp({
         const lastCheck = ref('');
         const lastChange = ref('');
         const checkInterval = ref(300);
+        const loginCheckEnabled = ref(true);
+        const loginCheckInterval = ref(1800);
         const statusReportEnabled = ref(true);
         const statusReportInterval = ref(3600);
         const statusReportOnStart = ref(true);
@@ -671,6 +696,8 @@ const app = createApp({
         const showSettings = ref(false);
         const savingSettings = ref(false);
         const cfgIpInterval = ref(300);
+        const cfgLoginCheckEnabled = ref(true);
+        const cfgLoginCheckInterval = ref(1800);
         const cfgReportEnabled = ref(true);
         const cfgReportInterval = ref(3600);
         const cfgReportOnStart = ref(true);
@@ -764,6 +791,8 @@ const app = createApp({
                 lastCheck.value = d.last_check;
                 lastChange.value = d.last_change;
                 checkInterval.value = d.check_interval || 300;
+                loginCheckEnabled.value = d.login_check_enabled !== false;
+                loginCheckInterval.value = d.login_check_interval || 1800;
                 statusReportEnabled.value = d.status_report_enabled !== false;
                 statusReportInterval.value = d.status_report_interval || 3600;
                 statusReportOnStart.value = d.status_report_on_start !== false;
@@ -925,6 +954,8 @@ const app = createApp({
         // ---- 运行参数设置 ----
         function openSettings() {
             cfgIpInterval.value = checkInterval.value;
+            cfgLoginCheckEnabled.value = loginCheckEnabled.value;
+            cfgLoginCheckInterval.value = loginCheckInterval.value;
             cfgReportEnabled.value = statusReportEnabled.value;
             cfgReportInterval.value = statusReportInterval.value;
             cfgReportOnStart.value = statusReportOnStart.value;
@@ -939,6 +970,8 @@ const app = createApp({
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         ip_check_interval: cfgIpInterval.value,
+                        login_check_enabled: cfgLoginCheckEnabled.value,
+                        login_check_interval: cfgLoginCheckInterval.value,
                         status_report_enabled: cfgReportEnabled.value,
                         status_report_interval: cfgReportInterval.value,
                         status_report_on_start: cfgReportOnStart.value,
@@ -973,6 +1006,7 @@ const app = createApp({
             loggedIn, loggingIn, loggingOut, checkingLogin, qrImage, qrImageUrl, loginStatus,
             needVerification, verifyImage, verifyCode, submittingCode,
             currentIp, lastCheck, lastChange, checkInterval,
+            loginCheckEnabled, loginCheckInterval,
             statusReportEnabled, statusReportInterval, statusReportOnStart,
             checkingIP, ipHistory,
             appIds, apps, newAppId, logs, logList,
@@ -982,6 +1016,7 @@ const app = createApp({
             updatingAppId, updateSingleApp,
             showAgentModal, agentModalReason, agentInputList, hasValidAgents, submitAgentIds,
             showSettings, savingSettings, cfgIpInterval,
+            cfgLoginCheckEnabled, cfgLoginCheckInterval,
             cfgReportEnabled, cfgReportInterval, cfgReportOnStart,
             openSettings, saveSettings,
         };
