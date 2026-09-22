@@ -36,6 +36,7 @@ bash start.sh
 - 📊 实时日志、IP变更历史
 - 🔑 验证码网页端交互
 - 🔄 支持手动单应用更新
+- 通知服务 - 多渠道 + WebSocket 推送实时日志 [Telegram（含代理）/Bark/企业微信群机器人/企业微信自建应用/钉钉/飞书/Server 酱/PushPlus/Go-WXPush / WXPush/WxPusher/QQ 机器人]
 
 ## 系统要求
 
