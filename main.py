@@ -17,12 +17,21 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import WEB_PORT, IP_CHECK_INTERVAL, DATA_DIR, load_user_config, save_user_config
+from config import (
+    WEB_PORT, IP_CHECK_INTERVAL, DATA_DIR,
+    load_user_config, save_user_config,
+    STATUS_REPORT_INTERVAL, STATUS_REPORT_ON_START,
+)
 from database import (
     init_db, add_log, get_logs, get_conn, get_current_ip, update_current_ip,
     add_ip_history, get_ip_history, upsert_app, get_apps, delete_app
 )
 from services.ip_check import get_public_ip
+from services.notify import (
+    send_notification, notify_startup, notify_startup_failed,
+    notify_login_expired, notify_ip_changed, notify_job_error,
+    notify_status_report,
+)
 from browser.auth import BrowserManager
 from browser.ip_updater import IPUpdater
 
@@ -40,6 +49,14 @@ browser_manager = BrowserManager()
 ip_updater = IPUpdater(browser_manager)
 ws_clients = set()
 scheduler = AsyncIOScheduler()
+
+
+def _has_login_expired(results):
+    for r in results or []:
+        msg = r.get("message") or ""
+        if "登录态已失效" in msg or "登录已失效" in msg or "未登录" in msg:
+            return True
+    return False
 
 
 async def ws_broadcast(msg_type, data):
@@ -67,6 +84,8 @@ async def ip_check_job():
         add_log("INFO", f"检测到公网IP变化: {old_ip} -> {new_ip}")
         await ws_broadcast("log", {"level": "INFO", "message": f"检测到IP变化: {old_ip} -> {new_ip}"})
         await ws_broadcast("ip_changed", {"old_ip": old_ip, "new_ip": new_ip})
+        await notify_ip_changed(old_ip, new_ip, ws_broadcast)
+
         apps = get_apps()
         config = load_user_config()
         app_ids = config.get("app_ids", [])
@@ -75,8 +94,10 @@ async def ip_check_job():
             await ws_broadcast("log", {"level": "WARN", "message": "没有配置应用ID，跳过更新"})
             update_current_ip(new_ip)
             return
+
         for aid in app_ids:
             upsert_app(aid)
+
         all_success = True
         results = []
         for app_id in app_ids:
@@ -84,32 +105,82 @@ async def ip_check_job():
             results.append({"app_id": app_id, **result})
             if not result["success"]:
                 all_success = False
+
         update_current_ip(new_ip)
         add_ip_history(old_ip, new_ip, "全部成功" if all_success else "部分失败")
-        from services.notify import send_notification
+
         await send_notification(old_ip, new_ip, results, ws_broadcast)
+
+        if _has_login_expired(results):
+            await notify_login_expired(ws_broadcast)
+
     except Exception as e:
         logger.error(f"IP检测任务异常: {e}")
         add_log("ERROR", f"IP检测任务异常: {str(e)}")
+        await notify_job_error(str(e), ws_broadcast)
+
+
+async def status_report_job():
+    """定期运行状态汇报（传真实状态给通知层）"""
+    try:
+        await notify_status_report(
+            ws_broadcast,
+            reason="定时汇报",
+            scheduler_running=scheduler.running,
+            browser_manager=browser_manager,
+        )
+    except Exception as e:
+        logger.error(f"状态汇报异常: {e}")
+        add_log("ERROR", f"状态汇报异常: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
-    browser_manager.set_ws_broadcast(ws_broadcast)
-    ip_updater.set_ws_broadcast(ws_broadcast)
-    scheduler.add_job(
-        ip_check_job,
-        IntervalTrigger(seconds=IP_CHECK_INTERVAL),
-        id="ip_check",
-        name="公网IP检测",
-        replace_existing=True,
-    )
-    scheduler.start()
-    add_log("INFO", "服务启动，定时IP检测已开启")
-    logger.info(f"服务启动: http://0.0.0.0:{WEB_PORT}")
-    asyncio.create_task(ip_check_job())
+    try:
+        init_db()
+        browser_manager.set_ws_broadcast(ws_broadcast)
+        ip_updater.set_ws_broadcast(ws_broadcast)
+
+        scheduler.add_job(
+            ip_check_job,
+            IntervalTrigger(seconds=IP_CHECK_INTERVAL),
+            id="ip_check",
+            name="公网IP检测",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            status_report_job,
+            IntervalTrigger(seconds=STATUS_REPORT_INTERVAL),
+            id="status_report",
+            name="运行状态汇报",
+            replace_existing=True,
+        )
+
+        scheduler.start()
+        add_log("INFO", f"服务启动，IP检测每 {IP_CHECK_INTERVAL}s，状态汇报每 {STATUS_REPORT_INTERVAL}s")
+        logger.info(f"服务启动: http://0.0.0.0:{WEB_PORT}")
+
+        # 关键改动：通知和首次任务都用 create_task，不阻塞 lifespan
+        # 这样 uvicorn 会立刻开始接收请求，Web 页面秒开
+        asyncio.create_task(notify_startup(ws_broadcast, WEB_PORT))
+        asyncio.create_task(ip_check_job())
+        if STATUS_REPORT_ON_START:
+            asyncio.create_task(notify_status_report(
+                ws_broadcast,
+                reason="服务启动",
+                scheduler_running=True,
+                browser_manager=browser_manager,
+            ))
+    except Exception as e:
+        logger.exception("启动失败")
+        try:
+            asyncio.create_task(notify_startup_failed(str(e), ws_broadcast))
+        except Exception:
+            pass
+        raise
+
     yield
+
     scheduler.shutdown()
     await browser_manager.close()
     add_log("INFO", "服务已停止")
@@ -158,6 +229,7 @@ async def api_status():
         "apps": apps,
         "logged_in": browser_manager._logged_in,
         "check_interval": IP_CHECK_INTERVAL,
+        "status_report_interval": STATUS_REPORT_INTERVAL,
         "scheduler_running": scheduler.running,
     })
 
@@ -279,6 +351,18 @@ async def api_scheduler_stop():
     return JSONResponse({"running": False, "message": "定时检测已停止"})
 
 
+@app.post("/api/status_report")
+async def api_status_report():
+    """手动触发一次状态汇报（传真实状态）"""
+    asyncio.create_task(notify_status_report(
+        ws_broadcast,
+        reason="手动触发",
+        scheduler_running=scheduler.running,
+        browser_manager=browser_manager,
+    ))
+    return JSONResponse({"success": True, "message": "状态汇报已触发"})
+
+
 @app.post("/api/logout")
 async def api_logout():
     auth_file = os.path.join(DATA_DIR, "auth_state.json")
@@ -323,8 +407,11 @@ async def _do_force_update():
         results.append({"app_id": app_id, **result})
     update_current_ip(new_ip)
     add_ip_history(old_ip, new_ip, "手动强制更新")
-    from services.notify import send_notification
+
     await send_notification(old_ip, new_ip, results, ws_broadcast)
+
+    if _has_login_expired(results):
+        await notify_login_expired(ws_broadcast)
 
 
 @app.post("/api/check_ip")
