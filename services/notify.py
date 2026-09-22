@@ -1,5 +1,5 @@
 """
-通知服务 - 多渠道 + WebSocket 推送（全部内嵌，无需根目录 notify.py）
+通知服务 - 多渠道 + WebSocket 推送
 
 支持的渠道（在下面的「通知渠道配置区」修改 enabled 和地址即可）：
 - Telegram（含代理）
@@ -54,7 +54,7 @@ except ImportError:  # pragma: no cover
 
 # --- Telegram --------------------------------------------------------
 TELEGRAM = {
-    'enabled': False,      # True/False
+    'enabled': False      # True/False
     'botToken': '',       # 必填：Bot Token
     'chatId': '',         # 必填：Chat ID
     'proxy': 'http://192.168.2.30:7890',          # 可选：如 http://127.0.0.1:7890，留空则直连
@@ -112,7 +112,7 @@ PUSHPLUS = {
 
 # --- Go-WXPush / WXPush ----------------------------------------------
 WXPUSH = {
-    'enabled': False,     # True/False
+    'enabled': True,     # True/False
     'url': 'http://192.168.2.30:5566',            # 必填：如 http://192.168.2.30:5566
     'token': '',          # 仅 WXPush（Cloudflare版）填，Go-WXPush 留空
 }
@@ -524,9 +524,15 @@ async def send_notification(old_ip: str, new_ip: str, results: list, ws_broadcas
     total = len(results)
     now = _now()
 
-    title = f"{'✅' if success_count == total else '⚠️'} 可信IP更新{'成功' if success_count == total else '异常'}"
+    if old_ip == new_ip:
+        title = f"{'✅' if success_count == total else '⚠️'} 可信IP强制更新{'成功' if success_count == total else '异常'}"
+        first_line = f"IP未变化: {new_ip}（手动强制刷新）"
+    else:
+        title = f"{'✅' if success_count == total else '⚠️'} 可信IP更新{'成功' if success_count == total else '异常'}"
+        first_line = f"IP变更: {old_ip} → {new_ip}"
+
     lines = [
-        f"IP变更: {old_ip} → {new_ip}",
+        first_line,
         f"时间: {now}",
         f"结果: {success_count}/{total} 个应用更新成功",
         "",
@@ -640,12 +646,20 @@ async def notify_status_report(
     """
     try:
         from database import get_current_ip, get_apps
-        from config import IP_CHECK_INTERVAL
+        from config import IP_CHECK_INTERVAL as _DEFAULT_IP_INTERVAL
+        from config import load_user_config as _load_cfg
     except Exception as e:
         title = "📊 运行状态汇报"
         content = f"时间: {_now()}\n错误: 读取状态失败 {e}"
         await _multi_channel_push(title, content)
         return content
+
+    # 当前生效的 IP 检测间隔（用户配置优先）
+    try:
+        _user_cfg = _load_cfg()
+        ip_interval = int(_user_cfg.get("ip_check_interval", _DEFAULT_IP_INTERVAL))
+    except Exception:
+        ip_interval = _DEFAULT_IP_INTERVAL
 
     try:
         current = get_current_ip() or {}
@@ -657,7 +671,8 @@ async def notify_status_report(
         apps = []
 
     cur_ip = current.get("ip", "0.0.0.0")
-    last_check = current.get("last_check", "—")
+    last_check = current.get("last_check", "") or "—"
+    last_change = current.get("last_change", "") or "—"
 
     # 登录态：用传入的 browser_manager 实时检查
     logged_in = False
@@ -682,7 +697,7 @@ async def notify_status_report(
     else:
         app_lines.append("  （未配置任何应用）")
 
-    # 定时任务状态：用传入的参数
+    # 定时任务状态
     if scheduler_running is True:
         sched_text = "✅ 运行中"
     elif scheduler_running is False:
@@ -696,8 +711,9 @@ async def notify_status_report(
         "",
         f"🌐 当前公网IP: {cur_ip}",
         f"🕒 上次检测: {last_check}",
+        f"📅 上次变更: {last_change}",
         f"🔐 微信登录态: {login_text}",
-        f"⏱ 检测间隔: {IP_CHECK_INTERVAL}s",
+        f"⏱ 检测间隔: {ip_interval}s",
         f"📋 定时任务: {sched_text}",
         "",
         f"📱 应用可信IP（共 {len(apps)} 个）:",
