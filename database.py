@@ -9,18 +9,15 @@ from config import DB_FILE
 
 
 def get_conn():
-    """获取数据库连接"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    """初始化数据库表"""
     conn = get_conn()
     cursor = conn.cursor()
 
-    # 应用配置表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS apps (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,7 +30,6 @@ def init_db():
         )
     """)
 
-    # IP变更历史表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ip_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +40,6 @@ def init_db():
         )
     """)
 
-    # 操作日志表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,14 +49,15 @@ def init_db():
         )
     """)
 
-    # 当前IP记录
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS current_ip (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             ip TEXT DEFAULT '0.0.0.0',
             last_check TEXT DEFAULT (datetime('now','localtime')),
             last_change TEXT DEFAULT '',
-            last_login_check TEXT DEFAULT ''
+            last_login_check TEXT DEFAULT '',
+            login_valid INTEGER DEFAULT -1,
+            login_checked_at TEXT DEFAULT ''
         )
     """)
 
@@ -72,10 +68,14 @@ def init_db():
             cursor.execute("ALTER TABLE current_ip ADD COLUMN last_change TEXT DEFAULT ''")
         if "last_login_check" not in cols:
             cursor.execute("ALTER TABLE current_ip ADD COLUMN last_login_check TEXT DEFAULT ''")
+        if "login_valid" not in cols:
+            cursor.execute("ALTER TABLE current_ip ADD COLUMN login_valid INTEGER DEFAULT -1")
+        if "login_checked_at" not in cols:
+            cursor.execute("ALTER TABLE current_ip ADD COLUMN login_checked_at TEXT DEFAULT ''")
     except Exception:
         pass
 
-    # 迁移：如果 last_change 为空，从 ip_history 取最近一次变更时间填充
+    # 迁移：last_change 为空时，从 ip_history 填充
     try:
         row = cursor.execute(
             "SELECT last_change, last_check FROM current_ip WHERE id = 1"
@@ -103,12 +103,8 @@ def init_db():
 
 
 def add_log(level: str, message: str):
-    """添加日志，自动裁剪超过1000条的旧日志"""
     conn = get_conn()
-    conn.execute(
-        "INSERT INTO logs (level, message) VALUES (?, ?)",
-        (level, message)
-    )
+    conn.execute("INSERT INTO logs (level, message) VALUES (?, ?)", (level, message))
     cursor = conn.cursor()
     cursor.execute("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 1000)")
     conn.commit()
@@ -116,39 +112,34 @@ def add_log(level: str, message: str):
 
 
 def get_logs(limit: int = 100) -> list:
-    """获取最近日志"""
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM logs ORDER BY id DESC LIMIT ?", (limit,)
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def get_current_ip() -> dict:
-    """获取当前记录的IP"""
     conn = get_conn()
     row = conn.execute("SELECT * FROM current_ip WHERE id = 1").fetchone()
     conn.close()
     if row:
         result = dict(row)
-        # 兜底字段，兼容旧库
         result.setdefault("last_change", "")
         result.setdefault("last_login_check", "")
+        result.setdefault("login_valid", -1)
+        result.setdefault("login_checked_at", "")
         return result
-    return {"ip": "0.0.0.0", "last_check": "", "last_change": "", "last_login_check": ""}
+    return {
+        "ip": "0.0.0.0",
+        "last_check": "",
+        "last_change": "",
+        "last_login_check": "",
+        "login_valid": -1,
+        "login_checked_at": "",
+    }
 
 
 def update_current_ip(ip: str, ip_changed: bool = False):
-    """
-    更新当前IP。
-
-    参数：
-    - ip: 新的公网IP
-    - ip_changed: 本次 IP 是否真的发生了变化
-        - True  → 同时刷新 last_change
-        - False → 只刷新 last_check
-    """
     conn = get_conn()
     if ip_changed:
         conn.execute("""
@@ -172,7 +163,7 @@ def update_current_ip(ip: str, ip_changed: bool = False):
 
 
 def update_login_check_time():
-    """刷新'上次登录检测'时间（每次登录态检查跑完都调用）"""
+    """刷新'上次登录检测'时间"""
     conn = get_conn()
     try:
         conn.execute("""
@@ -187,8 +178,52 @@ def update_login_check_time():
         conn.close()
 
 
+def update_login_state(valid: bool):
+    """写入登录态和检查时间（Cookie保活/手动检查/登录成功后调用）"""
+    conn = get_conn()
+    try:
+        v = 1 if valid else 0
+        conn.execute("""
+            INSERT INTO current_ip (id, login_valid, login_checked_at, last_login_check)
+            VALUES (1, ?, datetime('now','localtime'), datetime('now','localtime'))
+            ON CONFLICT(id) DO UPDATE SET
+                login_valid = excluded.login_valid,
+                login_checked_at = datetime('now','localtime'),
+                last_login_check = datetime('now','localtime')
+        """, (v,))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def get_login_state() -> dict:
+    """
+    读取缓存的登录态。
+    返回 {"valid": True/False/None, "checked_at": "..."}
+    valid 为 None 表示"还没检测过"
+    """
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT login_valid, login_checked_at FROM current_ip WHERE id = 1").fetchone()
+        if row is None:
+            return {"valid": None, "checked_at": ""}
+        v = row["login_valid"]
+        if v == 1:
+            valid = True
+        elif v == 0:
+            valid = False
+        else:
+            valid = None
+        return {"valid": valid, "checked_at": row["login_checked_at"] or ""}
+    except Exception:
+        return {"valid": None, "checked_at": ""}
+    finally:
+        conn.close()
+
+
 def add_ip_history(old_ip: str, new_ip: str, result: str = ""):
-    """记录IP变更历史"""
     conn = get_conn()
     conn.execute(
         "INSERT INTO ip_history (old_ip, new_ip, update_result) VALUES (?, ?, ?)",
@@ -199,17 +234,13 @@ def add_ip_history(old_ip: str, new_ip: str, result: str = ""):
 
 
 def get_ip_history(limit: int = 20) -> list:
-    """获取IP变更历史"""
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM ip_history ORDER BY id DESC LIMIT ?", (limit,)
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM ip_history ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def upsert_app(agent_id: str, app_name: str = "", current_ip: str = ""):
-    """添加或更新应用"""
     conn = get_conn()
     conn.execute("""
         INSERT INTO apps (agent_id, app_name, current_ip) VALUES (?, ?, ?)
@@ -222,7 +253,6 @@ def upsert_app(agent_id: str, app_name: str = "", current_ip: str = ""):
 
 
 def update_app_ip(agent_id: str, ip: str, status: str = "success"):
-    """更新应用的可信IP"""
     conn = get_conn()
     conn.execute("""
         UPDATE apps SET current_ip = ?, last_update = datetime('now','localtime'), status = ?
@@ -233,7 +263,6 @@ def update_app_ip(agent_id: str, ip: str, status: str = "success"):
 
 
 def get_apps() -> list:
-    """获取所有应用"""
     conn = get_conn()
     rows = conn.execute("SELECT * FROM apps ORDER BY id").fetchall()
     conn.close()
@@ -241,7 +270,6 @@ def get_apps() -> list:
 
 
 def delete_app(agent_id: str):
-    """删除应用"""
     conn = get_conn()
     conn.execute("DELETE FROM apps WHERE agent_id = ?", (agent_id,))
     conn.commit()
