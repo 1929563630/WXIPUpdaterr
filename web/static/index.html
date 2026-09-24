@@ -561,27 +561,27 @@
                 </div>
             </div>
 
-            <!-- 登录态检查 -->
-            <div class="settings-section" :class="{ disabled: !cfgLoginCheckEnabled }">
-                <div class="settings-row">
-                    <span class="title">🔐 启用登录态检查</span>
-                    <el-switch v-model="cfgLoginCheckEnabled" />
-                </div>
-                <div class="settings-hint">
-                    独立于 IP 检测，定期检查企业微信 Cookie 是否还有效。发现失效时主动通知。
-                </div>
+  <!-- Cookie 保活 -->
+<div class="settings-section" :class="{ disabled: !cfgLoginCheckEnabled }">
+    <div class="settings-row">
+        <span class="title">🍪 启用 Cookie 保活</span>
+        <el-switch v-model="cfgLoginCheckEnabled" />
+    </div>
+    <div class="settings-hint">
+        定期访问企业微信后台，让 Cookie 自动续期，延长登录态有效期，同时检测是否失效。
+    </div>
 
-                <div class="settings-row" style="margin-top:14px;">
-                    <span class="title">⏱ 检查间隔（秒）</span>
-                    <el-input-number v-model="cfgLoginCheckInterval" :min="300" :max="86400" :step="300"
-                                     size="small" controls-position="right" style="width:160px;"
-                                     :disabled="!cfgLoginCheckEnabled" />
-                </div>
-                <div class="settings-hint">
-                    多久检查一次登录态。默认 1800（30分钟），最小 300（5分钟）。
-                    不建议设太短，避免频繁访问企业微信后台触发风控。
-                </div>
-            </div>
+    <div class="settings-row" style="margin-top:14px;">
+        <span class="title">⏱ 保活周期（秒）</span>
+        <el-input-number v-model="cfgLoginCheckInterval" :min="300" :max="86400" :step="300"
+                         size="small" controls-position="right" style="width:160px;"
+                         :disabled="!cfgLoginCheckEnabled" />
+    </div>
+    <div class="settings-hint">
+        多久访问一次后台保活。建议 600（10分钟），最小 300（5分钟）。
+        不建议太短，避免频繁访问企业微信后台触发风控。
+    </div>
+</div>
 
             <!-- 状态汇报 -->
             <div class="settings-section" :class="{ disabled: !cfgReportEnabled }">
