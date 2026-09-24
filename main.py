@@ -50,9 +50,10 @@ ip_updater = IPUpdater(browser_manager)
 ws_clients = set()
 scheduler = AsyncIOScheduler()
 
-# 上次已知的登录状态（用于避免重复通知）
-# None = 未知，True = 有效，False = 失效
+# 上次已知的登录状态（避免重复通知）
 _last_login_state = None
+# 上次登录态检查时间戳（用于 /api/status 30 秒缓存）
+_last_login_check_time = 0
 
 
 def get_effective_settings() -> dict:
@@ -67,9 +68,9 @@ def get_effective_settings() -> dict:
     except (ValueError, TypeError):
         report_interval = STATUS_REPORT_INTERVAL
     try:
-        login_interval = int(cfg.get("login_check_interval", 1800))
+        login_interval = int(cfg.get("login_check_interval", 600))
     except (ValueError, TypeError):
-        login_interval = 1800
+        login_interval = 600
 
     report_enabled = bool(cfg.get("status_report_enabled", True))
     report_on_start = bool(cfg.get("status_report_on_start", STATUS_REPORT_ON_START))
@@ -152,7 +153,8 @@ async def ip_check_job():
             if not result["success"]:
                 all_success = False
 
-        update_current_ip(new_ip, ip_changed=True)
+        # 只有全部成功才刷新"上次变更"时间
+        update_current_ip(new_ip, ip_changed=all_success)
         add_ip_history(old_ip, new_ip, "全部成功" if all_success else "部分失败")
 
         await send_notification(old_ip, new_ip, results, ws_broadcast)
@@ -166,18 +168,18 @@ async def ip_check_job():
         await notify_job_error(str(e), ws_broadcast)
 
 
-async def login_check_job():
+async def cookie_keepalive_job():
     """
-    低频检查企业微信登录态。
+    Cookie 保活任务：访问企业微信后台，刷新 Cookie 并写回文件，
+    同时检测登录态是否失效。
     """
     global _last_login_state
     try:
         auth_file = os.path.join(DATA_DIR, "auth_state.json")
         if not os.path.exists(auth_file):
-            # 从未登录过，跳过（不刷新检测时间，因为没有"检测"可言）
             return
 
-        valid = await browser_manager.check_login_valid()
+        valid = await browser_manager.keepalive()
         browser_manager._logged_in = valid
         browser_manager._login_checked = True
 
@@ -191,29 +193,28 @@ async def login_check_job():
         # 首次运行：只记录，不通知
         if _last_login_state is None:
             _last_login_state = valid
-            add_log("INFO", f"登录态检查: {'有效' if valid else '已失效'}")
+            add_log("INFO", f"Cookie保活: {'成功' if valid else '登录态已失效'}")
             return
 
-        # 从有效 → 失效：发通知
+        # 从有效 → 失效
         if _last_login_state and not valid:
-            logger.warning("登录态已失效")
-            add_log("WARN", "登录态检查发现已失效")
+            logger.warning("Cookie保活失败，登录态已失效")
+            add_log("WARN", "Cookie保活失败，登录态已失效")
             await ws_broadcast("log", {"level": "WARN", "message": "⚠️ 登录态已失效，请重新扫码"})
             await notify_login_expired(ws_broadcast)
 
-        # 从失效 → 有效：记一条恢复日志
+        # 从失效 → 有效
         elif not _last_login_state and valid:
-            add_log("INFO", "登录态已恢复")
+            add_log("INFO", "Cookie保活成功，登录态已恢复")
             await ws_broadcast("log", {"level": "SUCCESS", "message": "✅ 登录态已恢复"})
 
         _last_login_state = valid
 
     except Exception as e:
-        logger.error(f"登录态检查异常: {e}")
+        logger.error(f"Cookie保活异常: {e}")
 
 
 async def status_report_job():
-    """定期运行状态汇报"""
     try:
         await notify_status_report(
             ws_broadcast,
@@ -227,10 +228,8 @@ async def status_report_job():
 
 
 async def _reschedule_jobs():
-    """根据当前有效设置重新排期定时任务"""
     settings = get_effective_settings()
     try:
-        # 1. IP 检测任务（一直有）
         scheduler.add_job(
             ip_check_job,
             IntervalTrigger(seconds=settings["ip_check_interval"]),
@@ -239,13 +238,12 @@ async def _reschedule_jobs():
             replace_existing=True,
         )
 
-        # 2. 登录态检查任务
         if settings["login_check_enabled"]:
             scheduler.add_job(
-                login_check_job,
+                cookie_keepalive_job,
                 IntervalTrigger(seconds=settings["login_check_interval"]),
                 id="login_check",
-                name="登录态检查",
+                name="Cookie保活",
                 replace_existing=True,
             )
         else:
@@ -254,7 +252,6 @@ async def _reschedule_jobs():
             except Exception:
                 pass
 
-        # 3. 状态汇报任务
         if settings["status_report_enabled"]:
             scheduler.add_job(
                 status_report_job,
@@ -272,7 +269,7 @@ async def _reschedule_jobs():
         add_log(
             "INFO",
             f"定时任务已重新排期: IP检测 {settings['ip_check_interval']}s, "
-            f"登录检查 {'每 ' + str(settings['login_check_interval']) + 's' if settings['login_check_enabled'] else '已关闭'}, "
+            f"Cookie保活 {'每 ' + str(settings['login_check_interval']) + 's' if settings['login_check_enabled'] else '已关闭'}, "
             f"状态汇报 {'每 ' + str(settings['status_report_interval']) + 's' if settings['status_report_enabled'] else '已关闭'}"
         )
     except Exception as e:
@@ -288,7 +285,6 @@ async def lifespan(app: FastAPI):
 
         settings = get_effective_settings()
 
-        # IP 检测
         scheduler.add_job(
             ip_check_job,
             IntervalTrigger(seconds=settings["ip_check_interval"]),
@@ -297,17 +293,15 @@ async def lifespan(app: FastAPI):
             replace_existing=True,
         )
 
-        # 登录态检查
         if settings["login_check_enabled"]:
             scheduler.add_job(
-                login_check_job,
+                cookie_keepalive_job,
                 IntervalTrigger(seconds=settings["login_check_interval"]),
                 id="login_check",
-                name="登录态检查",
+                name="Cookie保活",
                 replace_existing=True,
             )
 
-        # 状态汇报
         if settings["status_report_enabled"]:
             scheduler.add_job(
                 status_report_job,
@@ -321,7 +315,7 @@ async def lifespan(app: FastAPI):
         add_log(
             "INFO",
             f"服务启动，IP检测每 {settings['ip_check_interval']}s，"
-            f"登录检查 {'每 ' + str(settings['login_check_interval']) + 's' if settings['login_check_enabled'] else '已关闭'}，"
+            f"Cookie保活 {'每 ' + str(settings['login_check_interval']) + 's' if settings['login_check_enabled'] else '已关闭'}，"
             f"状态汇报 {'每 ' + str(settings['status_report_interval']) + 's' if settings['status_report_enabled'] else '已关闭'}"
         )
         logger.info(f"服务启动: http://0.0.0.0:{WEB_PORT}")
@@ -376,24 +370,34 @@ async def index():
 
 @app.get("/api/status")
 async def api_status():
+    global _last_login_check_time
+    import time
+
     current = get_current_ip()
     config = load_user_config()
     apps = get_apps()
     settings = get_effective_settings()
 
-    if not browser_manager._login_checked:
+    auth_file = os.path.join(DATA_DIR, "auth_state.json")
+    if not os.path.exists(auth_file):
+        browser_manager._logged_in = False
         browser_manager._login_checked = True
-        auth_file = os.path.join(DATA_DIR, "auth_state.json")
-        if os.path.exists(auth_file):
-            browser_manager._logged_in = await browser_manager.check_login_valid()
-        else:
-            browser_manager._logged_in = False
+    else:
+        now = time.time()
+        # 30 秒内不重复检查，避免每次刷新都跑一遍
+        if not browser_manager._login_checked or (now - _last_login_check_time) > 30:
+            browser_manager._login_checked = True
+            _last_login_check_time = now
+            try:
+                browser_manager._logged_in = await browser_manager.check_login_valid()
+            except Exception:
+                pass
 
     return JSONResponse({
         "current_ip": current.get("ip", "0.0.0.0"),
         "last_check": current.get("last_check", ""),
         "last_change": current.get("last_change", ""),
-        "last_login_check": current.get("last_login_check", ""),   # ← 新增
+        "last_login_check": current.get("last_login_check", ""),
         "app_ids": config.get("app_ids", []),
         "apps": apps,
         "logged_in": browser_manager._logged_in,
@@ -414,7 +418,6 @@ async def api_get_settings():
 
 @app.post("/api/settings")
 async def api_save_settings(data: dict):
-    """保存运行参数并重新排期"""
     cfg = load_user_config()
     changed = False
 
@@ -440,7 +443,7 @@ async def api_save_settings(data: dict):
             cfg["login_check_interval"] = v
             changed = True
         except (ValueError, TypeError):
-            return JSONResponse({"success": False, "message": "登录态检查间隔必须为整数"}, status_code=400)
+            return JSONResponse({"success": False, "message": "Cookie保活周期必须为整数"}, status_code=400)
 
     if "status_report_enabled" in data:
         cfg["status_report_enabled"] = bool(data["status_report_enabled"])
@@ -533,7 +536,6 @@ async def _do_login_flow():
 async def _wait_login_and_extract():
     success = await browser_manager.poll_login_status()
     if success:
-        # 登录成功后重置上一次的登录状态
         global _last_login_state
         _last_login_state = True
         await _auto_extract_and_update()
@@ -568,7 +570,6 @@ async def api_submit_code(data: dict):
 @app.post("/api/check_login")
 async def api_check_login():
     valid = await browser_manager.check_login_valid()
-    # 手动检查也刷新"上次登录检测"时间
     try:
         from database import update_login_check_time
         update_login_check_time()
@@ -597,7 +598,6 @@ async def api_scheduler_stop():
 
 @app.post("/api/status_report")
 async def api_status_report():
-    """手动触发一次状态汇报"""
     asyncio.create_task(notify_status_report(
         ws_broadcast,
         reason="手动触发",
@@ -648,10 +648,14 @@ async def _do_force_update():
         return
     old_ip = get_current_ip().get("ip", "")
     results = []
+    all_success = True
     for app_id in app_ids:
         result = await ip_updater.update_trusted_ip(app_id, new_ip)
         results.append({"app_id": app_id, **result})
-    update_current_ip(new_ip, ip_changed=(old_ip != new_ip))
+        if not result["success"]:
+            all_success = False
+    # 只有全部成功才刷新"上次变更"时间
+    update_current_ip(new_ip, ip_changed=(old_ip != new_ip) and all_success)
     add_ip_history(old_ip, new_ip, "手动强制更新")
 
     await send_notification(old_ip, new_ip, results, ws_broadcast)
@@ -702,7 +706,7 @@ if __name__ == "__main__":
     main_settings = get_effective_settings()
     logger.info(
         f"有效配置: IP检测 {main_settings['ip_check_interval']}s, "
-        f"登录检查 {'每 ' + str(main_settings['login_check_interval']) + 's' if main_settings['login_check_enabled'] else '已关闭'}, "
+        f"Cookie保活 {'每 ' + str(main_settings['login_check_interval']) + 's' if main_settings['login_check_enabled'] else '已关闭'}, "
         f"状态汇报 {'每 ' + str(main_settings['status_report_interval']) + 's' if main_settings['status_report_enabled'] else '已关闭'}"
     )
     import uvicorn
