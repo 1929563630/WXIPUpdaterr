@@ -1,12 +1,13 @@
 """
 浏览器登录管理 - Playwright 自动化
-负责：扫码登录、Cookie持久化、验证码交互
+负责：扫码登录、Cookie持久化、验证码交互、Cookie保活
 """
 import asyncio
 import os
 import json
 import base64
 import time
+import shutil
 from datetime import datetime
 from typing import Optional, Callable, Awaitable
 from playwright.async_api import async_playwright, Page, BrowserContext, Browser
@@ -28,7 +29,6 @@ class BrowserManager:
         self._login_checked = False
         self._ws_broadcast: Optional[Callable] = None
         self._login_lock = asyncio.Lock()
-        # 验证码状态
         self._verify_notified = False
         self._verify_submitted = False
 
@@ -66,13 +66,23 @@ class BrowserManager:
             locale="zh-CN",
         )
 
-    async def _save_login_state(self):
-        if self._context:
-            try:
-                await self._context.storage_state(path=AUTH_STATE_FILE)
+    async def _save_login_state(self, silent: bool = False):
+        """保存当前 context 的 Cookie 到文件，覆盖前自动备份"""
+        if not self._context:
+            return
+        try:
+            # 覆盖前先备份
+            if os.path.exists(AUTH_STATE_FILE):
+                try:
+                    shutil.copy2(AUTH_STATE_FILE, AUTH_STATE_FILE + ".bak")
+                except Exception:
+                    pass
+
+            await self._context.storage_state(path=AUTH_STATE_FILE)
+            if not silent:
                 await self._broadcast("log", {"level": "INFO", "message": "登录态已保存"})
-            except Exception as e:
-                await self._broadcast("log", {"level": "ERROR", "message": f"保存登录态失败: {e}"})
+        except Exception as e:
+            await self._broadcast("log", {"level": "ERROR", "message": f"保存登录态失败: {e}"})
 
     async def check_login_valid(self) -> bool:
         try:
@@ -92,6 +102,41 @@ class BrowserManager:
             return is_valid
         except Exception:
             return False
+
+    async def keepalive(self) -> bool:
+        """
+        Cookie 保活：访问企业微信后台，让服务器下发新 Cookie 并保存。
+
+        返回：
+        - True  登录态仍有效，Cookie 已刷新并写回文件
+        - False 登录态已失效，不做保存
+        """
+        try:
+            await self.init_browser()
+
+            # 优先复用现有 context（避免每次重建）
+            if not self._context or not self._page:
+                self._context = await self._create_context(use_saved_state=True)
+                self._page = await self._context.new_page()
+
+            await self._page.goto(WECHAT_ADMIN_URL, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(2)
+
+            url = self._page.url
+            valid = "login" not in url.lower()
+
+            if valid:
+                # 保存新的 Cookie 到文件（静默，避免日志刷屏）
+                await self._save_login_state(silent=True)
+                self._logged_in = True
+                return True
+            else:
+                self._logged_in = False
+                return False
+        except Exception as e:
+            await self._broadcast("log", {"level": "WARN", "message": f"Cookie保活异常: {e}"})
+            # 出错时保留已有状态，不轻易判定失效
+            return bool(self._logged_in)
 
     async def start_login(self) -> dict:
         async with self._login_lock:
@@ -192,7 +237,6 @@ class BrowserManager:
             pass
 
     async def _find_in_frames(self, selectors, require_visible: bool = True):
-        """遍历所有 frame 查找选择器，返回第一个匹配的元素"""
         if not self._page:
             return None
         for frame in self._page.frames:
@@ -212,11 +256,8 @@ class BrowserManager:
         return None
 
     async def _find_verify_input(self):
-        """查找验证码输入框：常规选择器 → 遍历 input/textarea → 穿透 shadow DOM"""
         if not self._page:
             return None
-
-        # 第一轮：常规选择器
         el = await self._find_in_frames([
             "input[placeholder*='验证码']",
             "input[placeholder*='短信']",
@@ -230,8 +271,6 @@ class BrowserManager:
         ])
         if el:
             return el
-
-        # 第二轮：遍历所有可见的 input / textarea / contenteditable
         for frame in self._page.frames:
             try:
                 candidates = await frame.query_selector_all(
@@ -249,8 +288,6 @@ class BrowserManager:
                         continue
             except Exception:
                 continue
-
-        # 第三轮：穿透 shadow DOM
         for frame in self._page.frames:
             try:
                 handle = await frame.evaluate_handle("""
@@ -280,15 +317,11 @@ class BrowserManager:
                     return el
             except Exception:
                 continue
-
         return None
 
     async def _find_submit_button(self):
-        """查找提交按钮：常规选择器 → 遍历 button/[role=button]/a 按文字匹配"""
         if not self._page:
             return None
-
-        # 第一轮：常规选择器
         el = await self._find_in_frames([
             "button:has-text('确认')", "button:has-text('确定')",
             "button:has-text('提交')", "button:has-text('验证')",
@@ -306,8 +339,6 @@ class BrowserManager:
         ])
         if el:
             return el
-
-        # 第二轮：遍历所有可见按钮
         keywords = ["确认", "确定", "提交", "验证", "登录", "下一步", "继续"]
         for frame in self._page.frames:
             try:
@@ -323,11 +354,9 @@ class BrowserManager:
                         continue
             except Exception:
                 continue
-
         return None
 
     async def _dump_debug_info(self):
-        """打印每个 frame 的 URL、可见 input、可见按钮，用于排查验证码 DOM"""
         if not self._page:
             return
         info = []
@@ -381,7 +410,6 @@ class BrowserManager:
         return (verify_btn is not None or verify_input is not None), verify_btn, verify_input
 
     async def poll_login_status(self, max_attempts: int = 150, interval: int = 2):
-        """持续轮询：扫码 → 确认 → 验证码 → 登录成功"""
         scanned = False
         expired_notified = False
         debug_dumped = False
@@ -391,7 +419,6 @@ class BrowserManager:
             try:
                 url = self._page.url
 
-                # 登录成功
                 if "wework_admin/frame" in url and "login" not in url.lower():
                     self._logged_in = True
                     self.cleanup_qr()
@@ -406,7 +433,6 @@ class BrowserManager:
                     self._verify_submitted = False
                     return True
 
-                # 二维码过期：只在没进验证码阶段、且页面明确提示时判定
                 if not expired_notified and not self._verify_notified:
                     try:
                         body = await self._page.inner_text("body")
@@ -419,7 +445,6 @@ class BrowserManager:
                     except Exception:
                         pass
 
-                # 已扫码提示
                 if not scanned:
                     try:
                         body_text = await self._page.inner_text("body")
@@ -432,7 +457,6 @@ class BrowserManager:
                     except Exception:
                         pass
 
-                # 检测验证码
                 need_verify, verify_btn, verify_input = await self._detect_verify_needed()
 
                 if need_verify and not self._verify_notified:
@@ -447,7 +471,6 @@ class BrowserManager:
                         except Exception as e:
                             await self._broadcast("log", {"level": "WARN", "message": f"点击获取验证码失败: {e}"})
 
-                    # 打印调试信息，只打一次
                     if not debug_dumped:
                         debug_dumped = True
                         await self._dump_debug_info()
@@ -457,7 +480,6 @@ class BrowserManager:
                         "message": "请输入验证码",
                         "image": verify_img
                     })
-                    # 不 return，继续轮询
 
             except Exception:
                 pass
@@ -489,18 +511,15 @@ class BrowserManager:
             return ""
 
     async def submit_verification_code(self, code: str) -> bool:
-        """提交验证码：遍历所有 frame 找输入框 + type() 触发事件 + 点按钮三级兜底"""
         if not self._page:
             return False
         try:
-            # 1. 找输入框
             textarea = await self._find_verify_input()
             if not textarea:
                 await self._dump_debug_info()
                 await self._broadcast("log", {"level": "ERROR", "message": "未找到验证码输入框（已打印调试信息，请看上一行）"})
                 return False
 
-            # 2. 输入验证码（用 type 模拟人工键入，触发所有事件）
             await textarea.click()
             await asyncio.sleep(0.2)
             try:
@@ -512,7 +531,6 @@ class BrowserManager:
             await asyncio.sleep(0.5)
             await self._broadcast("log", {"level": "INFO", "message": f"已填入验证码: {code}"})
 
-            # 3. 找提交按钮
             btn = await self._find_submit_button()
             clicked = False
             if btn:
@@ -534,7 +552,6 @@ class BrowserManager:
             await self._broadcast("log", {"level": "INFO", "message": "验证码已提交，等待结果..."})
             await asyncio.sleep(3)
 
-            # 4. 检查结果
             if "login" not in self._page.url.lower() and "wework_admin/frame" in self._page.url:
                 self._logged_in = True
                 self.cleanup_qr()
